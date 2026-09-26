@@ -126,17 +126,17 @@ test('recall：private 仅 owner 可见，project 同租户可见', async () => 
     method: 'POST', body: { kind: 'semantic', content: '私有笔记-只有我', visibility: 'private' },
   }));
   // 成员召回看不到 admin 的 private
-  const seen = await j(await req(MB(tenantA.id) + '/recall?q=私有笔记', { token: memberKeyA }));
+  const seen = (await j(await req(MB(tenantA.id) + '/recall?mode=keyword&q=私有笔记', { token: memberKeyA }))).items;
   assert.ok(!seen.some((m) => m.id === priv.id), '成员不应看到他人的 private 记忆');
   // 但 admin 自己能看到
-  const mine = await j(await req(MB(tenantA.id) + '/recall?q=私有笔记'));
+  const mine = (await j(await req(MB(tenantA.id) + '/recall?mode=keyword&q=私有笔记'))).items;
   assert.ok(mine.some((m) => m.id === priv.id));
 
   // 成员建 project，可被 admin 看到
   const pub = await j(await req(MB(tenantA.id), {
     method: 'POST', token: memberKeyA, body: { kind: 'episodic', content: '项目公开纪要-成员' },
   }));
-  const byAdmin = await j(await req(MB(tenantA.id) + '/recall?q=公开纪要'));
+  const byAdmin = (await j(await req(MB(tenantA.id) + '/recall?mode=keyword&q=公开纪要'))).items;
   assert.ok(byAdmin.some((m) => m.id === pub.id));
 });
 
@@ -145,11 +145,11 @@ test('TTL：过期记忆被 recall 过滤，sweep 标记 expired', async () => {
   const m = await j(await req(MB(tenantA.id), {
     method: 'POST', body: { kind: 'episodic', content: '临时的验证码', ttlMs: 60000 },
   }));
-  let list = await j(await req(MB(tenantA.id) + '/recall?q=验证码'));
+  let list = (await j(await req(MB(tenantA.id) + '/recall?mode=keyword&q=验证码'))).items;
   assert.ok(list.some((x) => x.id === m.id), '未过期前应可召回');
   // 确定性过期：直接把 expires_at 推到过去
   await db().query(`UPDATE memories SET expires_at=? WHERE id=?`, [Date.now() - 1000, m.id]);
-  list = await j(await req(MB(tenantA.id) + '/recall?q=验证码'));
+  list = (await j(await req(MB(tenantA.id) + '/recall?mode=keyword&q=验证码'))).items;
   assert.ok(!list.some((x) => x.id === m.id), '过期后 recall 应过滤（懒过滤）');
   const sw = await sweepExpired(tenantA.id);
   assert.ok(sw.swept >= 1, 'sweep 应标记至少一条过期记忆');
@@ -204,7 +204,7 @@ test('forget：硬删 + 审计；他人 private 不可删', async () => {
   }));
   const del = await j(await req(MB(tenantA.id) + `/${m.id}`, { method: 'DELETE', token: memberKeyA }));
   assert.equal(del.deleted, true);
-  const list = await j(await req(MB(tenantA.id) + '/recall?q=可删的临时', { token: memberKeyA }));
+  const list = (await j(await req(MB(tenantA.id) + '/recall?mode=keyword&q=可删的临时', { token: memberKeyA }))).items;
   assert.ok(!list.some((x) => x.id === m.id));
 
   // 审计链有 memory.forgotten
@@ -221,7 +221,7 @@ test('forget：硬删 + 审计；他人 private 不可删', async () => {
 
 // ---------- 租户隔离 ----------
 test('跨租户访问被拒绝', async () => {
-  const r = await req(MB(tenantA.id) + '/recall', { token: adminKeyB });
+  const r = await req(MB(tenantA.id) + '/recall?mode=keyword', { token: adminKeyB });
   assert.equal(r.status, 403);
 });
 
@@ -237,4 +237,90 @@ test('linkMemories：建边 + 非法 relation 400', async () => {
     method: 'POST', body: { dstId: b.id, relation: 'likes' },
   });
   assert.equal(bad.status, 400);
+});
+
+/* ============ V2.2-B：语义向量召回 ============ */
+
+async function waitFor(fn, timeoutMs = 8000) {
+  const t0 = Date.now();
+  for (;;) {
+    const v = await fn().catch(() => null);
+    if (v) return v;
+    if (Date.now() - t0 > timeoutMs) throw new Error('waitFor 超时');
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+const semRecall = async (tid, q, token = adminKeyA) =>
+  j(await req(MB(tid) + `/recall?q=${encodeURIComponent(q)}`, { token }));
+
+test('semantic：向量召回按相似度排序（完全相同文本 cosine=1 排第一）', async () => {
+  const a = await j(await req(MB(tenantA.id), {
+    method: 'POST', body: { kind: 'semantic', content: '番茄炒蛋的做法：先炒鸡蛋再下番茄' },
+  }));
+  await j(await req(MB(tenantA.id), {
+    method: 'POST', body: { kind: 'semantic', content: '公司季度财报会议纪要：营收增长' },
+  }));
+  // remember 的向量索引是 best-effort 异步：轮询等待
+  await waitFor(async () => {
+    const r = await semRecall(tenantA.id, '番茄炒蛋的做法：先炒鸡蛋再下番茄');
+    return (r.mode === 'semantic' && r.items.some((x) => x.id === a.id)) || null;
+  });
+  const r = await semRecall(tenantA.id, '番茄炒蛋的做法：先炒鸡蛋再下番茄');
+  assert.equal(r.mode, 'semantic');
+  assert.equal(r.items[0].id, a.id, '完全相同文本应排第一');
+  assert.ok(r.items[0].score > 0.99, `score=${r.items[0].score}`);
+});
+
+test('semantic：跨租户隔离；private 对他人不可见', async () => {
+  const mb = await j(await req(MB(tenantB.id), {
+    method: 'POST', token: adminKeyB, body: { kind: 'semantic', content: 'B租户的秘密配方内容' },
+  }));
+  await waitFor(async () => {
+    const r = await semRecall(tenantB.id, 'B租户的秘密配方内容', adminKeyB);
+    return r.items.some((x) => x.id === mb.id) || null;
+  });
+  const ra = await semRecall(tenantA.id, 'B租户的秘密配方内容');
+  assert.ok(!ra.items.some((x) => x.id === mb.id), '跨租户向量召回应隔离');
+
+  const priv = await j(await req(MB(tenantA.id), {
+    method: 'POST', body: { kind: 'semantic', content: 'admin的私有菜谱秘方内容', visibility: 'private' },
+  }));
+  await waitFor(async () => {
+    const r = await semRecall(tenantA.id, 'admin的私有菜谱秘方内容');
+    return r.items.some((x) => x.id === priv.id) || null;
+  });
+  const rm = await semRecall(tenantA.id, 'admin的私有菜谱秘方内容', memberKeyA);
+  assert.ok(!rm.items.some((x) => x.id === priv.id), '他人不应看到 private 记忆');
+});
+
+test('semantic：forget 同步清理向量；reindex 可重建（operator）', async () => {
+  const m = await j(await req(MB(tenantA.id), {
+    method: 'POST', body: { kind: 'semantic', content: '待遗忘的向量记忆内容XYZ' },
+  }));
+  await waitFor(async () => {
+    const r = await semRecall(tenantA.id, '待遗忘的向量记忆内容XYZ');
+    return r.items.some((x) => x.id === m.id) || null;
+  });
+  await req(MB(tenantA.id) + `/${m.id}`, { method: 'DELETE' });
+  await waitFor(async () => {
+    const r = await semRecall(tenantA.id, '待遗忘的向量记忆内容XYZ');
+    return !r.items.some((x) => x.id === m.id) || null;
+  });
+
+  // 清空内存索引 → 语义召回为空 → operator reindex 重建 → 恢复
+  const { clearMemoryVectorIndex } = await import('../src/modules/memory/vector.mjs');
+  clearMemoryVectorIndex();
+  const empty = await semRecall(tenantA.id, '番茄炒蛋的做法');
+  assert.equal(empty.items.length, 0);
+  const ri = await j(await req('/v1/admin/memory/reindex', {
+    method: 'POST', token: OPERATOR, body: { tenantId: tenantA.id },
+  }));
+  assert.ok(ri.indexed >= 1, 'reindex 应重建索引');
+  await waitFor(async () => {
+    const r = await semRecall(tenantA.id, '番茄炒蛋的做法');
+    return r.items.length || null;
+  });
+  const r403 = await req('/v1/admin/memory/reindex', { method: 'POST', body: {} });
+  assert.equal(r403.status, 403);
 });

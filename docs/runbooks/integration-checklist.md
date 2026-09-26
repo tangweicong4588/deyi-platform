@@ -61,13 +61,19 @@
 
 ## 5. Qdrant（向量索引，派生数据）
 
-控制面期望：collection 名 `deyi_knowledge`，维度与当前 embedding 模型一致
-（不一致时启动/ensure 直接报错，要求重建索引）。
+控制面期望两个 collection（维度均与当前 embedding 模型一致，不一致时 ensure
+直接报错，要求重建索引）：
+- `deyi_knowledge`：知识库 chunks（V1.x）；
+- `deyi_memory`：记忆向量（V2.2-B，`POST /v1/tenants/:id/memory` 写入时 best-effort 索引）。
 
-- [ ] `curl http://localhost:6333/collections` 200。
+- [ ] `curl http://localhost:6333/collections` 200，能看到上述两个 collection
+      （`deyi_memory` 在第一条记忆写入或 `scripts/rebuild-memory-index.mjs` 后出现）。
 - [ ] 上传一篇文档走知识库 ingest，`/readyz` → `vector: qdrant(live)`。
-- [ ] 换 embedding 模型后：先删 collection 重建（`DELETE /collections/deyi_knowledge`），
-      再触发重建任务；Qdrant 数据可重建，PostgreSQL 才是真相源。
+- [ ] 写入一条记忆后 `GET /v1/tenants/:id/memory/recall?q=...` → `mode: semantic`。
+- [ ] 换 embedding 模型后：先删 collection 重建
+      （`DELETE /collections/deyi_knowledge` / `DELETE /collections/deyi_memory`），
+      再跑 `scripts/rebuild-qdrant.mjs` / `scripts/rebuild-memory-index.mjs`；
+      Qdrant 数据可重建，PostgreSQL 才是真相源。
 - 坑：生产建议关闭 6333 的宿主机端口映射，仅容器网络访问。
 
 ## 6. Docling（文档解析）
