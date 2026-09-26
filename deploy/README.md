@@ -9,6 +9,7 @@
 cd deploy
 cp .env.example .env
 # 编辑 .env：把每个 CHANGEME_ 换成强随机值（openssl rand -hex 32）
+./verify-manifests.sh   # 先跑静态自洽检查（无需 Docker）：变量/卷/模型表/k8s 键引用
 docker compose up --build -d
 docker compose logs -f control-plane   # 看启动日志与 adapters 状态
 ```
