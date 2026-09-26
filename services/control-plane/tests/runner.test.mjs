@@ -456,16 +456,15 @@ test('step 参数非法：step 非法/commands 为空 → 400', async () => {
 test('step 沙箱逃逸经 HTTP 被拒', async () => {
   const req = await mkReq();
   const chg = await mkChg(req.id);
+  const before = (await (await get(`${P()}/change-packages/${chg.id}/runner-runs`)).json()).data.length;
   const r = await runStep(chg.id, 'build', {
     commands: [{ argv: ['node', '-e', '1'], cwd: '../../etc' }],
   });
   assert.equal(r.status, 400);
   assert.match(JSON.stringify(await r.json()), /PATH_ESCAPE/);
-  // run 行必须落为 failed，不能卡死在 running
+  // M-12：先验证再落库——非法输入不得产生 run 脏数据
   const runs = (await (await get(`${P()}/change-packages/${chg.id}/runner-runs`)).json()).data;
-  assert.ok(runs.length >= 1);
-  assert.ok(runs.every((x) => x.status !== 'running' && x.status !== 'pending'));
-  assert.ok(runs.some((x) => x.status === 'failed'));
+  assert.equal(runs.length, before, '逃逸输入不应落库任何 runner_run');
 });
 
 test('step 总预算：stepTimeoutMs 短于单命令超时时提前杀', async () => {
@@ -521,4 +520,91 @@ test('viewer 无写权限：触发 step → 403', async () => {
   const chg = await mkChg(req.id);
   const r = await runStep(chg.id, 'build', { commands: BUILD_CMDS }, viewerSecret);
   assert.equal(r.status, 403);
+});
+
+// ---------- Review-R5 回归（Runner 隔离加固） ----------
+
+test('R5 argv[0] 相对路径可执行文件：statSync 正常工作（M-3）', async () => {
+  const { dir } = isolated.prepareWorkspace({ source: { kind: 'empty' } });
+  try {
+    writeFileSync(join(dir, 'hello.sh'), '#!/bin/sh\necho hi\n');
+    const { chmodSync } = await import('node:fs');
+    chmodSync(join(dir, 'hello.sh'), 0o755);
+    const r = await isolated.execute({ workdir: dir, commands: [{ argv: ['./hello.sh'] }] });
+    assert.equal(r.status, 'passed');
+    assert.match(r.log, /hi/);
+  } finally { isolated.cleanupWorkspace(dir); }
+});
+
+test('R5 symlink argv[0] 指向 jail 外被拒（L-8）', async () => {
+  const { dir } = isolated.prepareWorkspace({ source: { kind: 'empty' } });
+  try {
+    const { symlinkSync } = await import('node:fs');
+    symlinkSync('/bin/echo', join(dir, 'evil-link'));
+    await assert.rejects(
+      isolated.execute({ workdir: dir, commands: [{ argv: ['./evil-link', 'x'] }] }),
+      (e) => e?.details?.code === 'PATH_ESCAPE');
+  } finally { isolated.cleanupWorkspace(dir); }
+});
+
+test('R5 argv 密钥两种形式都被脱敏（L-9）', async () => {
+  assert.deepEqual(
+    isolated.scrubArgv(['node', 'x.mjs', '--token', 'sekritABC', '--api-key=sekritDEF', '--other', 'keep']),
+    ['node', 'x.mjs', '--token', '***', '--api-key=***', '--other', 'keep']);
+  // 日志回显不带明文
+  const { dir } = isolated.prepareWorkspace({ source: { kind: 'empty' } });
+  try {
+    const r = await isolated.execute({
+      workdir: dir,
+      commands: [{ argv: ['node', '-e', '1', '--token', 'sekritABC'] }],
+      mode: 'fake',
+    });
+    assert.ok(!r.log.includes('sekritABC'), 'fake 日志回显应脱敏');
+    assert.ok(r.commands[0].argv.includes('***'), '返回的 argv 应脱敏');
+    assert.ok(!r.commands[0].argv.includes('sekritABC'));
+  } finally { isolated.cleanupWorkspace(dir); }
+});
+
+test('R5 脱敏面：AWS/GitHub/Slack/PEM/数据库 URL（M-2）', async () => {
+  const s = isolated.scrubRunnerText([
+    'key=AKIAIOSFODNN7EXAMPLE',
+    'tok=ghp_abcdefgh12345678',
+    'slack=xoxb-1234-abcdEFGH5678',
+    '-----BEGIN RSA PRIVATE KEY-----\nMIIBPAIBAAJB\n-----END RSA PRIVATE KEY-----',
+    'dsn=postgres://app:s3cr3t@db.internal:5432/appdb',
+  ].join('\n'));
+  assert.ok(!s.includes('AKIAIOSFODNN7EXAMPLE'));
+  assert.ok(!s.includes('ghp_abcdefgh12345678'));
+  assert.ok(!s.includes('xoxb-1234-abcdEFGH5678'));
+  assert.ok(!s.includes('MIIBPAIBAAJB'));
+  assert.ok(!s.includes('s3cr3t@db.internal'));
+  assert.ok(s.includes('postgres://***@db.internal:5432/appdb'));
+});
+
+test('R5 env 明文密钥先验后存：400 且不落库（M-12）', async () => {
+  const req = await mkReq();
+  const chg = await mkChg(req.id);
+  const before = (await (await get(`${P()}/change-packages/${chg.id}/runner-runs`)).json()).data.length;
+  const r = await runStep(chg.id, 'build', {
+    commands: BUILD_CMDS,
+    env: { DEPLOY_TOKEN: '明文不该入库' },
+  });
+  assert.equal(r.status, 400);
+  assert.match(JSON.stringify(await r.json()), /PLAINTEXT_SECRET/);
+  const runs = (await (await get(`${P()}/change-packages/${chg.id}/runner-runs`)).json()).data;
+  assert.equal(runs.length, before, '非法 env 不应落库 runner_run');
+  assert.ok(!JSON.stringify(runs).includes('明文不该入库'));
+});
+
+test('R5 prepareWorkspace 超时熔断（M-9）', async () => {
+  const src = mkdtempSync(join(tmpdir(), 'deyi-r5src-'));
+  writeFileSync(join(src, 'a.txt'), 'x');
+  assert.throws(
+    () => isolated.prepareWorkspace({ source: { kind: 'dir', path: src }, timeoutMs: 0 }),
+    (e) => e?.details?.code === 'WORKSPACE_TIMEOUT');
+  // 超时后半成品目录应被清理
+  const { readdirSync } = await import('node:fs');
+  const root = isolated.runnerRoot();
+  const leftovers = readdirSync(root).filter((n) => n.startsWith('ws_'));
+  assert.equal(leftovers.length, 0, '超时后不应残留半成品工作区');
 });

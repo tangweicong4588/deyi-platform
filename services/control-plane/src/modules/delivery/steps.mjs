@@ -27,6 +27,7 @@ import * as dsvc from './service.mjs';
 import {
   execute as runnerExecute,
   prepareWorkspace,
+  prevalidateRunnerInput,
   cleanupWorkspace,
   runnerRoot,
   currentRunnerMode,
@@ -88,13 +89,25 @@ export async function runStep({ tenantId, projectId, changePackageId, actorId,
   }
   const chg = await dsvc.getChangePackage(tenantId, projectId, changePackageId); // 归属校验
 
+  // M-12 安全 review：先验证再落库。工作区物化 + commands/env 全量校验
+  // （密钥铁律、jail、危险变量名）必须在 createRunnerRun 持久化 env 之前完成，
+  // 否则非法 env（含明文密钥）会以 pending run 的形式残留脏数据。
+  const src = source || (sourceDir ? { kind: 'dir', path: sourceDir } : { kind: 'empty' });
+  let wsDir;
+  let materialization;
+  try {
+    ({ dir: wsDir, materialization } = prepareWorkspace({ source: src, label: `${step}:${Date.now().toString(36)}` }));
+    prevalidateRunnerInput({ workdir: wsDir, commands, env });
+  } catch (e) {
+    if (wsDir) cleanupWorkspace(wsDir);
+    throw e;
+  }
+
   const run = await store.createRunnerRun({
     tenantId, projectId, changePackageId, step, name,
     commands, env: env || {}, limits: limits || {}, createdBy: actorId,
   });
 
-  const src = source || (sourceDir ? { kind: 'dir', path: sourceDir } : { kind: 'empty' });
-  const { dir: wsDir, materialization } = prepareWorkspace({ source: src, label: `${step}:${run.id}` });
   const mode = currentRunnerMode();
 
   let execResult;

@@ -25,6 +25,15 @@
  * 6. 输出上限：stdout/stderr 各自按字节截断（默认 1MB），防日志炸磁盘；
  *    截断打标记，调用方落库前已知是不完整日志。
  *
+ * 能力边界（M-11 review，如实声明，不夸大）：
+ * - 无容器/cgroup 时是"进程级隔离"：子进程 double-fork + setsid 的孙进程可脱离
+ *   进程组、逃过超时 SIGKILL；子进程也可通过 /proc、自建 socket 等侧信道与宿主交互。
+ *   生产环境必须跑在容器/K8s Job 内（deploy 文档已标注），本适配器只保证：
+ *   不经 shell、无 jail 外文件访问（调用方传入路径）、无危险 env、密钥不落地明文、
+ *   输出有界、超时尽力杀。
+ * - limitsEnforced 如实返回每条限制的 enforced/unenforced 状态，调用方（steps.mjs）
+ *   把它写进 runner_run 记录，审计可查。
+ *
  * 模式：
  * - live：本机隔离执行（默认）。无容器时是"进程级隔离"，生产必须用容器/K8s Job
  *  （deploy 文档已标注，见 limitsEnforced 里的 isolation 标注）。
@@ -39,7 +48,7 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import {
-  realpathSync, mkdirSync, writeFileSync, cpSync, rmSync, accessSync, constants,
+  realpathSync, mkdirSync, writeFileSync, cpSync, rmSync, accessSync, constants, statSync,
 } from 'node:fs';
 import { resolve, relative, sep, isAbsolute, join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -82,11 +91,40 @@ const SCRUB_RES = [
   [/((?:api[_-]?key|token|secret|password)\s*[:=]\s*)['"]?[^\s'",}]+/gi, '$1***'],
   [/\bsk-[A-Za-z0-9]{8,}\b/g, 'sk-***'],
   [/\bdyk_[A-Za-z0-9_-]{8,}\b/g, 'dyk_***'],
+  // M-2 安全 review：脱敏面补齐常见凭据形状
+  [/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA***'], // AWS access key id
+  [/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, 'gh***'], // GitHub token
+  [/\bxox[bpars]-[A-Za-z0-9-]{8,}\b/g, 'xox***'], // Slack token
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '-----BEGIN PRIVATE KEY-----***'], // PEM 私钥
+  [/\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s'"/]+@/gi, (m) => m.replace(/:\/\/[^\s'"/]+@/, '://***@')], // 数据库 URL 中的 user:pass
 ];
 export function scrubRunnerText(s) {
   let t = String(s || '');
   for (const [re, rep] of SCRUB_RES) t = t.replace(re, rep);
   return t;
+}
+
+/**
+ * L-9 安全 review：argv 脱敏。--flag value 与 --flag=value 两种形式的值都打码，
+ * 用于日志回显与结果返回（调用方/落库看到的 argv 不得含明文密钥）。
+ */
+const SECRET_FLAG_EQ_RE = /^(--?(?:api[_-]?key|token|secret|password)[\w-]*)=.+$/i;
+const SECRET_FLAG_RE = /^--?(?:api[_-]?key|token|secret|password)[\w-]*$/i;
+export function scrubArgv(argv) {
+  const out = [];
+  const list = Array.isArray(argv) ? argv : [];
+  for (let i = 0; i < list.length; i++) {
+    const a = String(list[i] ?? '');
+    const eq = a.match(SECRET_FLAG_EQ_RE);
+    if (eq) { out.push(`${eq[1]}=***`); continue; }
+    if (SECRET_FLAG_RE.test(a) && i + 1 < list.length && !String(list[i + 1]).startsWith('-')) {
+      out.push(a, '***');
+      i++;
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
 }
 
 /** 密钥字段名模式（沿用 delivery/service.mjs 的 rejectPlaintextSecrets 语义） */
@@ -123,19 +161,35 @@ function assertCommand(cmd, root, index) {
     || !argv.every((a) => typeof a === 'string' && a.length > 0 && a.length <= 4096)) {
     throw Errors.badRequest(`commands[${index}].argv 必须为非空字符串数组（1..${MAX_ARGV_LEN}）`, { code: 'BAD_ARGV' });
   }
-  const workCwd = resolveInWorkspace(root, String(cwd), `commands[${index}].cwd`);
+  let workCwd = resolveInWorkspace(root, String(cwd), `commands[${index}].cwd`);
+  try {
+    // L-8：cwd 若是 symlink，解析后再验一次 jail（词法 resolve 会被链接带到 jail 外）
+    const realCwd = realpathSync(workCwd);
+    workCwd = resolveInWorkspace(root, relative(root, realCwd) || '.', `commands[${index}].cwd`);
+  } catch { /* 不存在则 exec 时自然 ENOENT；词法检查已做 */ }
   let bin = argv[0];
   if (bin.includes('/') || bin.includes('\\')) {
     // 含路径分隔符：只允许 jail 内相对路径（如 ./gradlew）；jail 外绝对路径拒绝，
     // 调用方应改用 PATH 中的短名（沙箱 PATH 受控、可预期）。
     bin = resolveInWorkspace(root, bin, `commands[${index}].argv[0]`);
+    // L-8 安全 review：symlink 必须 realpath 解析后再验 jail。
+    // 原来只用 stat（跟随链接），workdir 内的 evil-link → /etc/passwd 这类链接
+    // 会通过词法检查，随后在 jail 外被执行。
+    let real;
     try {
-      const st = statSync(bin);
-      if (!st.isFile()) throw Errors.badRequest(`commands[${index}].argv[0] 不是可执行文件`, { code: 'NOT_EXECUTABLE' });
+      real = realpathSync(bin);
+    } catch {
+      throw Errors.badRequest(`commands[${index}].argv[0] 不存在: ${argv[0]}`, { code: 'BIN_NOT_FOUND' });
+    }
+    bin = resolveInWorkspace(root, relative(root, real) || '.', `commands[${index}].argv[0]`);
+    const st = statSync(bin); // 已是解析后真实路径，无跟随歧义
+    if (!st.isFile()) {
+      throw Errors.badRequest(`commands[${index}].argv[0] 不是可执行文件`, { code: 'NOT_EXECUTABLE' });
+    }
+    try {
       accessSync(bin, constants.X_OK);
-    } catch (e) {
-      if (e?.details?.code === 'NOT_EXECUTABLE') throw e;
-      throw Errors.badRequest(`commands[${index}].argv[0] 不存在或不可执行: ${argv[0]}`, { code: 'BIN_NOT_FOUND' });
+    } catch {
+      throw Errors.badRequest(`commands[${index}].argv[0] 不可执行: ${argv[0]}`, { code: 'NOT_EXECUTABLE' });
     }
   }
   // 不含 '/' 的短名：执行时走沙箱 PATH 查找（execFile 自带 PATH 查找），此处不预解析
@@ -245,17 +299,11 @@ function runOne({ file, args, cwd, env, timeoutMs, maxBytes }) {
 }
 
 /**
- * execute({ workdir, commands, env, limits, mode })
- * - workdir：必须已存在，且落在 runnerRoot() 内（realpath 比较）。
- * - commands：[{ argv: [...], cwd?: '.', name?: '' }]，按序执行，首个非 passed 即停。
- * - env：显式环境变量（白名单制，不继承 process.env）。
- * - limits：{ timeoutMs（单命令）, stepTimeoutMs（step 总预算，默认 1h）,
- *           memoryMb, cpuMs（有 prlimit 时生效）, maxOutputBytes（单流） }。
- * - mode：'live' | 'fake'，缺省走 currentRunnerMode()。
- * 返回：{ ok, status, exitCode, signal, commands:[...], log（脱敏）, logTruncated,
- *         limitsEnforced:[...], durationMs, simulated }
+ * M-12 安全 review：预校验（不执行）。供调用方在持久化 env/commands 之前先验证——
+ * 非法输入（明文密钥、jail 逃逸、危险变量）直接抛错，不留脏数据。
+ * 返回 { workdir（realpath 后）, plan（校验过的命令）, childEnv（白名单环境） }。
  */
-export async function execute({ workdir, commands, env, limits = {}, mode }) {
+export function prevalidateRunnerInput({ workdir, commands, env }) {
   if (!workdir || typeof workdir !== 'string') throw Errors.badRequest('workdir 必填');
   if (!Array.isArray(commands) || commands.length === 0 || commands.length > MAX_COMMANDS) {
     throw Errors.badRequest(`commands 必须为 1..${MAX_COMMANDS} 条命令的数组`, { code: 'BAD_COMMANDS' });
@@ -274,6 +322,22 @@ export async function execute({ workdir, commands, env, limits = {}, mode }) {
   // 注意：命令的 cwd/argv[0] jail 以 workdir 为根（不是 runnerRoot），否则命令会跑错目录
   const plan = commands.map((c, i) => assertCommand(c, absWorkdir, i));
   const childEnv = buildEnv(absWorkdir, env);
+  return { workdir: absWorkdir, plan, childEnv };
+}
+
+/**
+ * execute({ workdir, commands, env, limits, mode })
+ * - workdir：必须已存在，且落在 runnerRoot() 内（realpath 比较）。
+ * - commands：[{ argv: [...], cwd?: '.', name?: '' }]，按序执行，首个非 passed 即停。
+ * - env：显式环境变量（白名单制，不继承 process.env）。
+ * - limits：{ timeoutMs（单命令）, stepTimeoutMs（step 总预算，默认 1h）,
+ *           memoryMb, cpuMs（有 prlimit 时生效）, maxOutputBytes（单流） }。
+ * - mode：'live' | 'fake'，缺省走 currentRunnerMode()。
+ * 返回：{ ok, status, exitCode, signal, commands:[...], log（脱敏）, logTruncated,
+ *         limitsEnforced:[...], durationMs, simulated }
+ */
+export async function execute({ workdir, commands, env, limits = {}, mode }) {
+  const { workdir: absWorkdir, plan, childEnv } = prevalidateRunnerInput({ workdir, commands, env });
   const effMode = mode || currentRunnerMode();
 
   if (effMode === 'fake') return fakeExecute({ plan });
@@ -315,10 +379,9 @@ export async function execute({ workdir, commands, env, limits = {}, mode }) {
     let args = p.argv.slice(1);
     if (prl.bin) { args = [...prl.args, file, ...args]; file = prl.bin; }
     const r = await runOne({ file, args, cwd: p.cwd, env: childEnv, timeoutMs: Math.min(timeoutMs, remaining), maxBytes });
-    const cmdEcho = `$ ${p.argv.join(' ')}`;
     if (r.spawnError) {
       results.push({
-        name: p.name, argv: p.argv, cwd: p.cwd, exitCode: null, signal: null,
+        name: p.name, argv: scrubArgv(p.argv), cwd: p.cwd, exitCode: null, signal: null,
         timedOut: false, durationMs: r.durationMs,
         stdout: '', stderr: scrubRunnerText(r.spawnError), truncated: false, spawnError: true,
       });
@@ -331,7 +394,7 @@ export async function execute({ workdir, commands, env, limits = {}, mode }) {
     else if (r.exitCode !== 0) status = 'failed';
     const truncMark = r.truncated ? `\n…[truncated: 单流输出超过 ${maxBytes} 字节，已截断]` : '';
     results.push({
-      name: p.name, argv: p.argv, cwd: p.cwd,
+      name: p.name, argv: scrubArgv(p.argv), cwd: p.cwd,
       exitCode: r.exitCode, signal: r.signal, timedOut: r.timedOut,
       durationMs: r.durationMs,
       stdout: scrubRunnerText(r.stdout) + (r.truncated ? truncMark : ''),
@@ -369,13 +432,13 @@ export async function execute({ workdir, commands, env, limits = {}, mode }) {
 function fakeExecute({ plan }) {
   const commands = plan.map((p) => ({
     name: p.name,
-    argv: p.argv,
+    argv: scrubArgv(p.argv),
     cwd: p.cwd,
     exitCode: 0,
     signal: null,
     timedOut: false,
     durationMs: 0,
-    stdout: `[fake] ${p.argv.join(' ')} (simulated — 未真实执行)`,
+    stdout: `[fake] ${scrubArgv(p.argv).join(' ')} (simulated — 未真实执行)`,
     stderr: '',
     truncated: false,
   }));
@@ -390,25 +453,37 @@ function fakeExecute({ plan }) {
 }
 
 /**
- * prepareWorkspace({ source, label }) —— 创建独立工作区并物化源码。
+ * prepareWorkspace({ source, label, timeoutMs }) —— 创建独立工作区并物化源码。
  * - source: { kind:'dir', path, ref? } | { kind:'empty' } | null
  *   - git 仓库（且 git 可用）→ `git worktree add --detach`（独立 worktree）；
  *   - 否则目录拷贝（排除 .git，避免把整个仓库历史塞进工作区）。
+ * - timeoutMs：物化总超时（默认 120000ms）；M-9 数据 review：原来同步物化无超时，
+ *   大目录拷贝/挂住的 git 会无限占住调用方。git 调用走 execFileSync timeout；
+ *   目录拷贝在 filter 回调里检查 deadline（cpSync 本身无超时参数）。
  * - 返回 { dir, materialization: { method, source } }；dir 一定在 runnerRoot() 内。
  * "另一名工程师在独立 Runner 上复现"的技术基础：每次调用都是全新目录。
  */
-export function prepareWorkspace({ source, label = '' } = {}) {
+export function prepareWorkspace({ source, label = '', timeoutMs = 120000 } = {}) {
   const root = runnerRoot();
   const dir = join(root, `ws_${Date.now().toString(36)}_${randomBytes(4).toString('hex')}`);
   mkdirSync(dir, { recursive: true });
-  const materialization = materializeSource(dir, source);
-  if (label) {
-    try { writeFileSync(join(dir, '.runner-label'), `${label}\n${new Date().toISOString()}\n`); } catch { /* 忽略 */ }
+  const n = Number(timeoutMs);
+  const effTimeout = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 120000;
+  const deadline = Date.now() + effTimeout;
+  try {
+    const materialization = materializeSource(dir, source, deadline);
+    if (label) {
+      try { writeFileSync(join(dir, '.runner-label'), `${label}\n${new Date().toISOString()}\n`); } catch { /* 忽略 */ }
+    }
+    return { dir, materialization };
+  } catch (e) {
+    // 物化失败：清掉半成品目录，不留垃圾占 slot/磁盘
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    throw e;
   }
-  return { dir, materialization };
 }
 
-function materializeSource(dir, source) {
+function materializeSource(dir, source, deadline) {
   if (!source || source.kind === 'empty' || !source.path) {
     return { method: 'empty', source: null };
   }
@@ -418,19 +493,28 @@ function materializeSource(dir, source) {
   } catch {
     throw Errors.badRequest('source.path 不存在', { code: 'SOURCE_NOT_FOUND' });
   }
+  const gitTimeout = () => Math.max(1000, deadline - Date.now());
   // 优先 git worktree（真独立检出，可复现到指定 ref）
   try {
-    execFileSync('git', ['-C', src, 'rev-parse', '--is-inside-work-tree'], { stdio: 'pipe' });
+    execFileSync('git', ['-C', src, 'rev-parse', '--is-inside-work-tree'],
+      { stdio: 'pipe', timeout: gitTimeout() });
     const ref = source.ref || 'HEAD';
-    execFileSync('git', ['-C', src, 'worktree', 'add', '--detach', dir, ref], { stdio: 'pipe' });
+    execFileSync('git', ['-C', src, 'worktree', 'add', '--detach', dir, ref],
+      { stdio: 'pipe', timeout: gitTimeout() });
     return { method: 'git-worktree', source: { kind: 'dir', path: src, ref } };
   } catch (e) {
     if (e?.details?.code) throw e; // 平台错误直接透出
+    if (e?.code === 'ETIMEDOUT') {
+      throw Errors.badRequest('源码物化超时（git worktree）', { code: 'WORKSPACE_TIMEOUT' });
+    }
     // 非 git 目录 → 降级为目录拷贝（方法如实记录）
   }
   cpSync(src, dir, {
     recursive: true,
     filter: (p) => {
+      if (Date.now() > deadline) {
+        throw Errors.badRequest('源码物化超时（目录拷贝）', { code: 'WORKSPACE_TIMEOUT' });
+      }
       const base = p.slice(src.length);
       return base !== `${sep}.git` && !base.startsWith(`${sep}.git${sep}`);
     },
