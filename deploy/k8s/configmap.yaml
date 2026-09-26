@@ -10,6 +10,7 @@ data:
   BOOTSTRAP_ENABLED: "false"   # 生产禁止自动 bootstrap
   KEYCLOAK_URL: "http://keycloak:8080"
   KEYCLOAK_REALM: "deyi"
+  KEYCLOAK_AUDIENCE: "CHANGEME_keycloak_audience"  # 生产必填：JWT aud 校验，apply 前替换
   OPA_URL: "http://opa:8181"
   LITELLM_URL: "http://litellm:4000"
   QDRANT_URL: "http://qdrant:6333"
@@ -17,3 +18,6 @@ data:
   TEMPORAL_ADDRESS: "temporal:7233"
   GATEWAY_TIMEOUT_MS: "120000"
   GATEWAY_MAX_RETRIES: "2"
+  NOTIFY_TIMEOUT_MS: "8000"
+  # NOTIFY_ALLOW_PRIVATE_TARGETS: "false"  # 默认拒绝私网 webhook 目标；内网 webhook 才打开
+  # GITEA_URL: ""  # 设了才走真 Gitea 仓库适配器，否则 fake(fallback)

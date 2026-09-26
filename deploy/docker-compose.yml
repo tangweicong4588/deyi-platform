@@ -130,6 +130,8 @@ services:
       DOCLING_URL: http://docling:5001
       TEMPORAL_ADDRESS: temporal:7233
       AUDIT_ANCHOR_URL: ${AUDIT_ANCHOR_URL:-}
+      API_KEY_PEPPER: ${API_KEY_PEPPER:-}  # 可选：API Key 服务端 pepper（建议生产设置）
+      GITEA_URL: ${GITEA_URL:-}  # 可选：设了才走真 Gitea，否则 fake 仓库适配器
     ports:
       - "8080:8080"
     depends_on:

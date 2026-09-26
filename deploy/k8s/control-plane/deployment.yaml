@@ -52,6 +52,9 @@ spec:
             - name: LITELLM_MASTER_KEY
               valueFrom:
                 secretKeyRef: { name: deyi-secrets, key: LITELLM_MASTER_KEY }
+            - name: API_KEY_PEPPER  # 可选：secret 里没配则跳过（不阻断启动）
+              valueFrom:
+                secretKeyRef: { name: deyi-secrets, key: API_KEY_PEPPER, optional: true }
           readinessProbe:
             httpGet: { path: /readyz, port: 8080 }
             initialDelaySeconds: 10

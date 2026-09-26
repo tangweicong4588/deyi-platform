@@ -3,42 +3,26 @@
 > 约定：`$API` 为控制面地址（如 http://localhost:8080），`$OP` 为 OPERATOR_TOKEN。
 > API Key 的 `key` 字段**只在签发响应里出现一次**，立即存入密钥管理。
 
-## 步骤 1：建租户（平台运维）
+## 步骤 1：原子开通（平台运维，一次调用）
+
+`POST /v1/admin/tenants/provision` 在同一事务内创建：租户 + 默认项目 + admin 主体 +
+租户级 admin 角色绑定 + 一次性 API Key（任一步失败整体回滚）。
 
 ```bash
-curl -s -X POST $API/v1/admin/tenants \
+PROV=$(curl -s -X POST $API/v1/admin/tenants/provision \
   -H "Authorization: Bearer $OP" -H 'Content-Type: application/json' \
-  -d '{"name":"示例企业","slug":"acme"}'
-# 记下返回的 id：ten_xxx
+  -d '{"name":"示例企业","plan":"trial","adminName":"张三","adminEmail":"zhangsan@acme.com"}')
+echo "$PROV" | python3 -m json.tool
+# 记下：data.tenant.id（ten_xxx）、data.project.id（prj_xxx）、
+#      data.actor.id、data.apiKey.key（dyk_…，只返回一次！）
+T=$(echo "$PROV" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['tenant']['id'])")
+K=$(echo "$PROV" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['apiKey']['key'])")
+P=$(echo "$PROV" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['project']['id'])")
+# plan：trial | professional | enterprise（默认 trial）；trial 限 5 项目 / 20 主体 / 20 Key
 ```
 
-## 步骤 2：建项目（平台运维代建，或先给租户 admin key 让对方自建）
-
-```bash
-T=ten_xxx
-curl -s -X POST $API/v1/admin/tenants/$T/projects \
-  -H "Authorization: Bearer $OP" -H 'Content-Type: application/json' \
-  -d '{"name":"客服知识库","slug":"kb"}'
-# 记下 prj_xxx
-```
-
-## 步骤 3：建主体 + 发 API Key
-
-```bash
-# 主体
-A=$(curl -s -X POST $API/v1/admin/tenants/$T/actors \
-  -H "Authorization: Bearer $OP" -H 'Content-Type: application/json' \
-  -d '{"kind":"user","name":"张三","email":"zhangsan@acme.com"}' | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['id'])")
-# 角色绑定（租户级 admin；项目级用 {"projectId":"prj_xxx","role":"operator"}）
-curl -s -X POST $API/v1/admin/tenants/$T/role-bindings \
-  -H "Authorization: Bearer $OP" -H 'Content-Type: application/json' \
-  -d "{\"actorId\":\"$A\",\"role\":\"admin\"}"
-# 发 key（key 只返回一次！）
-curl -s -X POST $API/v1/admin/tenants/$T/api-keys \
-  -H "Authorization: Bearer $OP" -H 'Content-Type: application/json' \
-  -d "{\"actorId\":\"$A\",\"name\":\"prod-key\"}"
-# 记下 data.key：dyk_...（存入 Vault，发给客户）
-```
+> 旧的分步建租户/项目/主体/Key 流程仍可用（`POST /v1/admin/tenants` 等），
+> 但新租户一律走原子开通；手工分步只用于补救场景。
 
 ## 步骤 4：设预算（租户级 + 项目级，按需）
 
@@ -64,7 +48,7 @@ curl -s $API/v1/me -H "Authorization: Bearer $K"
 # 模型调用（带项目头，费用记到项目账本）
 curl -s -X POST $API/v1/gw/chat/completions \
   -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
-  -H "x-deyi-project: prj_xxx" \
+  -H "x-deyi-project: $P" \
   -d '{"model":"deyi-default","messages":[{"role":"user","content":"你好"}]}'
 # 查账本（应有 1 条，不含 prompt 原文）
 curl -s "$API/v1/admin/tenants/$T/usage?limit=5" -H "Authorization: Bearer $K"
@@ -79,4 +63,6 @@ curl -s "$API/v1/admin/tenants/$T/usage?limit=5" -H "Authorization: Bearer $K"
 ## 下线/轮换
 
 - 吊销 key：`DELETE /v1/admin/tenants/$T/api-keys/:keyId`（立即失效）
-- 租户停用：平台运维在 DB 将 tenant status 置 `suspended`（策略层全局拒绝）
+- 租户停用：`POST /v1/admin/tenants/$T/suspend`（其全部 Key 立即 401；审计记 tenant.suspend）
+- 租户恢复：`POST /v1/admin/tenants/$T/resume`（原 Key 自动可用；审计记 tenant.resume）
+- 套餐变更：`PATCH /v1/admin/tenants/$T` `{"plan":"professional"}`（配额即时生效；无计费结算，如需计费另行对接）

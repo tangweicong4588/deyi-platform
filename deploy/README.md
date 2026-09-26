@@ -64,7 +64,8 @@ for img in postgres:16.4 qdrant/qdrant:v1.11.0 quay.io/keycloak/keycloak:25.0.6 
 done
 # 2. 端口未被占用：8080/6333/8081/4000/8181/5001/7233
 # 3. 卷目录可写（pgdata/qdrantdata 为命名卷，Docker 自动管理）
-# 4. 启动后：curl /readyz，确认无 fallback（生产要求见上表）
+# 4. 启动后跑冒烟脚本（strict=生产验收：adapters 出现 fallback 即失败）
+OPERATOR_TOKEN=xxx ./smoke.sh --strict
 # 5. 按 docs/runbooks/tenant-onboarding.md 建第一个租户并调通模型调用
 ```
 
