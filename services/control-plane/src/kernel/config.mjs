@@ -46,6 +46,8 @@ const DEF = {
   BUSINESS_VERIFY_TOTAL_TIMEOUT_MS: '120000', // V2.0-C read-back 同步重试总时长熔断（默认 120s）
   AUDIT_ANCHOR_URL: '',      // 外部锚定端点（R13）；未设则只做本地哈希链并警告
   OTEL_EXPORTER_OTLP_ENDPOINT: '', // 设了就发 OTLP/HTTP traces，否则 tracing 全 no-op
+  NOTIFY_TIMEOUT_MS: '8000', // 通知 webhook 单次投递超时（同步投递，超时即记 failed）
+  NOTIFY_ALLOW_PRIVATE_TARGETS: 'false', // webhook 目标允许内网/回环地址（默认拒绝，防 SSRF；测试可开）
 };
 
 function load() {

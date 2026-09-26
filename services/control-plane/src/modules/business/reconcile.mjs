@@ -5,8 +5,8 @@
  *   - open：刚入队（执行失败 / 验证差异），待受理。
  *   - investigating：人工已受理调查中。
  *   - resolved：人工确认差异已处理（必须记录决议 note + 可选证据引用）。
- *   - escalated：升级，指定处理人（assignee）；升级时记"通知"审计事件，
- *     真实通知通道（短信/IM/工单）留扩展点，本阶段只审计留痕。
+ *   - escalated：升级，指定处理人（assignee）；升级时经 notify 模块真实投递
+ *     （webhook，未配通道则记 skipped，绝不静默），并记审计事件。
  *   - closed：终端。resolved/escalated 可关闭；resolved 可打回 investigating 重查。
  *
  * 全部状态变更与决议入 P7 审计链（business.reconciliation.*）。
@@ -16,6 +16,7 @@ import { Errors } from '../../kernel/errors.mjs';
 import { ctx } from '../../kernel/context.mjs';
 import * as store from './store.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
+import { notifyReconEscalated } from '../notify/service.mjs';
 
 export const RECON_TRANSITIONS = {
   open: ['investigating', 'escalated'],
@@ -84,13 +85,23 @@ export async function transitionRecon({ tenantId, projectId, reconId, to, actorI
     payload: { from: recon.status, to, assignee: patch.assignee || undefined, note: note ? String(note).slice(0, 500) : undefined },
   });
   if (to === 'escalated') {
-    // 通知扩展点：真实通知通道（短信/IM/工单）未实现，先记审计事件留痕，绝不静默
+    // V2.1-C：真实通知投递（webhook）。无通道时 sendNotification 记 skipped + 审计，
+    // 绝不静默；投递失败同样记 failed 并进审计，调用方不因通知失败而回滚对账状态变更。
+    let notifyOut = null;
+    try {
+      notifyOut = await notifyReconEscalated({ tenantId, projectId, recon, assignee: patch.assignee });
+    } catch (e) {
+      notifyOut = { delivered: false, error: String(e.message || e).slice(0, 300) };
+    }
     await tryAudit({
       tenantId, projectId, actorId, traceId: c.traceId,
       action: 'business.reconciliation.notify', resourceKind: 'reconciliation_item', resourceId: recon.id,
       payload: {
-        to: patch.assignee, channel: 'extension-point',
-        message: `对账项 ${recon.id} 已升级，指派给 ${patch.assignee}（真实通知通道待接入）`,
+        to: patch.assignee,
+        delivered: notifyOut.delivered,
+        reason: notifyOut.reason || undefined,
+        results: (notifyOut.results || []).map((r) => ({ channel: r.channel, ok: r.ok, error: r.error })),
+        error: notifyOut.error || undefined,
       },
     });
   }
