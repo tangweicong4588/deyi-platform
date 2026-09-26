@@ -39,7 +39,8 @@ const DEF = {
   RUNNER_MAX_OUTPUT_BYTES: '1048576',  // 单流（stdout/stderr）默认输出上限字节数
   MCP_TIMEOUT_MS: '30000',      // 单次工具调用超时
   EXEC_RESULT_TIMEOUT_MS: '60000', // Temporal 结果轮询上限
-  BUSINESS_GRANT_TTL_MS: '900000', // V2.0-B 业务执行短期授权 TTL（默认 15 分钟）
+  BUSINESS_GRANT_TTL_MS: '900000', // V2.0-B 业务执行短期授权 TTL（默认 15 分钟，上限 60 分钟）
+  BUSINESS_VERIFY_TOTAL_TIMEOUT_MS: '120000', // V2.0-C read-back 同步重试总时长熔断（默认 120s）
   AUDIT_ANCHOR_URL: '',      // 外部锚定端点（R13）；未设则只做本地哈希链并警告
   OTEL_EXPORTER_OTLP_ENDPOINT: '', // 设了就发 OTLP/HTTP traces，否则 tracing 全 no-op
 };

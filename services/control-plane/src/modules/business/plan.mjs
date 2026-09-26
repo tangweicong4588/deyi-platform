@@ -19,7 +19,8 @@
 import { createHash } from 'node:crypto';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx } from '../../kernel/context.mjs';
-import { nowMs } from '../../kernel/ids.mjs';
+import { nowMs, newId } from '../../kernel/ids.mjs';
+import { db } from '../../db/index.mjs';
 import { logger } from '../../kernel/logging.mjs';
 import * as store from './store.mjs';
 import { submitCandidate } from '../ontology/service.mjs';
@@ -461,14 +462,27 @@ export async function approvePlan({ tenantId, projectId, planId, actorId }) {
   if (intent && intent.created_by && intent.created_by === actorId) {
     throw Errors.forbidden('审批人与意图创建人必须职责分离', { code: 'SOD_VIOLATION' });
   }
-  await store.updatePlan(tenantId, planId, { status: 'approved' });
-  // V2.0-B：审批记录落库（审批人≠创建人已在上方校验），高风险动作执行时的硬检查依据，
-  // 也是 P6 执行审批自动放行的授权来源
-  await store.recordPlanApproval({ tenantId, planId, approverId: actorId });
-  for (const a of await store.listActions(tenantId, planId)) {
-    if (a.status === 'dryrun_ok') await store.updateAction(tenantId, a.id, { status: 'approved' });
-  }
-  await store.setIntentStatus(tenantId, plan.intent_id, 'approved');
+  // M-4 业务 review：批准是多表写（计划+审批记录+动作+意图），必须同一事务 + CAS，
+  // 防"计划已 approved 但审批记录/动作状态没写上"的不一致，以及并发双重批准。
+  const now = nowMs();
+  await db().transaction(async (tx) => {
+    const upd = await tx.run(
+      `UPDATE business_plans SET status='approved', updated_at=? WHERE id=? AND tenant_id=? AND status='dryrun_passed'`,
+      [now, planId, tenantId]);
+    if (upd.changes === 0) throw Errors.conflict('计划已被并发处理（非 dryrun_passed 状态）');
+    await tx.run(
+      `INSERT INTO plan_approvals(id,plan_id,tenant_id,approver_id,decided_at,created_at)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(plan_id) DO UPDATE SET approver_id=excluded.approver_id,
+         decided_at=excluded.decided_at, created_at=excluded.created_at, id=excluded.id`,
+      [newId('bpar'), planId, tenantId, actorId, now, now]);
+    await tx.run(
+      `UPDATE business_actions SET status='approved', updated_at=? WHERE plan_id=? AND tenant_id=? AND status='dryrun_ok'`,
+      [now, planId, tenantId]);
+    await tx.run(
+      `UPDATE business_intents SET status='approved', updated_at=? WHERE id=? AND tenant_id=?`,
+      [now, plan.intent_id, tenantId]);
+  });
   const c = ctx();
   await tryAudit({
     tenantId, projectId, actorId, traceId: c.traceId,
@@ -484,8 +498,18 @@ export async function rejectPlan({ tenantId, projectId, planId, actorId, reason 
   if (!['draft', 'dryrun_passed', 'dryrun_blocked'].includes(plan.status)) {
     throw Errors.badRequest(`计划当前状态 ${plan.status} 不允许驳回`, { code: 'INVALID_PLAN_STATE' });
   }
-  await store.updatePlan(tenantId, planId, { status: 'rejected' });
-  await store.setIntentStatus(tenantId, plan.intent_id, 'rejected');
+  // M-4：驳回同样 CAS + 事务（计划+意图两表），防并发双重决议
+  const now = nowMs();
+  await db().transaction(async (tx) => {
+    const upd = await tx.run(
+      `UPDATE business_plans SET status='rejected', updated_at=?
+       WHERE id=? AND tenant_id=? AND status IN ('draft','dryrun_passed','dryrun_blocked')`,
+      [now, planId, tenantId]);
+    if (upd.changes === 0) throw Errors.conflict('计划已被并发处理');
+    await tx.run(
+      `UPDATE business_intents SET status='rejected', updated_at=? WHERE id=? AND tenant_id=?`,
+      [now, plan.intent_id, tenantId]);
+  });
   const c = ctx();
   await tryAudit({
     tenantId, projectId, actorId, traceId: c.traceId,
@@ -493,6 +517,43 @@ export async function rejectPlan({ tenantId, projectId, planId, actorId, reason 
     payload: { reason: String(reason || '').slice(0, 500) },
   });
   return store.getPlan(tenantId, planId);
+}
+
+/**
+ * H-3 业务 review：失败计划的恢复路径。
+ * executePlan 失败后计划停在 approved、失败动作卡在 failed/compensated（executeAction
+ * 不接受这些状态），原来没有任何 API 能把它救回来，只能废弃重建。
+ * resetPlan：把失败/补偿/执行中的动作重置为 approved + 新幂等键（旧键已关联失败记录，
+ * 复用会导致"重复执行直接返回旧失败结果"），意图回到 approved，随后可重新 executePlan。
+ */
+export async function resetPlan({ tenantId, projectId, planId, actorId }) {
+  const plan = await store.getPlan(tenantId, planId);
+  if (!plan) throw Errors.notFound('业务计划不存在');
+  if (plan.project_id !== projectId) throw Errors.forbidden('计划不属于该项目');
+  if (!['dryrun_passed', 'approved'].includes(plan.status)) {
+    throw Errors.badRequest(`计划当前状态 ${plan.status} 不允许重置（仅 dryrun_passed/approved 可重置）`,
+      { code: 'INVALID_PLAN_STATE' });
+  }
+  const actions = await store.listActions(tenantId, planId);
+  const retryable = actions.filter((a) => ['failed', 'compensated', 'executing'].includes(a.status));
+  if (!retryable.length) {
+    throw Errors.badRequest('没有可重置的失败动作', { code: 'NOTHING_TO_RESET' });
+  }
+  const reset = [];
+  for (const a of retryable) {
+    const n = await store.countActionExecutions(tenantId, a.id);
+    const newKey = createHash('sha256').update(`${planId}:${a.seq}:retry:${n + 1}`).digest('hex').slice(0, 32);
+    const ra = await store.resetActionForRetry(tenantId, a.id, newKey);
+    reset.push({ action_id: a.id, seq: a.seq, idempotency_key: newKey, status: ra.status });
+  }
+  await store.setIntentStatus(tenantId, plan.intent_id, 'approved');
+  const c = ctx();
+  await tryAudit({
+    tenantId, projectId, actorId, traceId: c.traceId,
+    action: 'business.plan.reset', resourceKind: 'business_plan', resourceId: planId,
+    payload: { reset_actions: reset.map((r) => r.action_id) },
+  });
+  return { plan: await store.getPlan(tenantId, planId), reset };
 }
 
 export { TEMPLATES };

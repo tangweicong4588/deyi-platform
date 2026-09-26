@@ -151,6 +151,15 @@ export function registerBusinessRoutes(app) {
   });
 
   // ---- 执行（V2.0-B） ----
+  app.post(R('/business/plans/:planId/reset'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'plan.reset');
+    await policyCheck({ actor, tenantId, project, action: 'business.write', resource: { kind: 'business_plan' } });
+    const out = await withTenant(tenantId, () => plan.resetPlan({
+      tenantId, projectId: project.id, planId: req.params.planId, actorId: c.actorId,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
   app.post(R('/business/actions/:actionId/execute'), authenticate, async (req, res) => {
     const { project, tenantId, actor, c } = await scopedProject(req, 1, 'action.execute');
     await policyCheck({ actor, tenantId, project, action: 'business.write', resource: { kind: 'business_action' } });

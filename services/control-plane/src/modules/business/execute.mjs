@@ -42,7 +42,9 @@ const SUMMARY_MAX = 4096;
 
 function grantTtlMs() {
   const n = Number(config.BUSINESS_GRANT_TTL_MS);
-  return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+  const ttl = Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+  // M-8 业务 review：TTL 上限钳制（默认 15 分钟，最大 60 分钟），防超长有效 grant
+  return Math.min(ttl, 60 * 60 * 1000);
 }
 
 /** grant scope：本次动作允许的工具+参数范围 */
@@ -69,6 +71,8 @@ export async function issueGrant({ tenantId, projectId, actionId, actorId, ttlMs
     scope: scopeFor(action, tool),
     expiresAt: nowMs() + (ttlMs || grantTtlMs()),
     createdBy: actorId,
+    // H-2 安全 review：grant 绑定持有人——签发给谁，只有谁能用
+    grantedTo: actorId,
   });
   const c = ctx();
   await tryAudit({
@@ -79,12 +83,18 @@ export async function issueGrant({ tenantId, projectId, actionId, actorId, ttlMs
   return { grant, tool };
 }
 
-/** 校验外部传入的 grant：存在性 / 归属 / 状态 / 有效期 / scope 逐项核对 */
-export async function validateGrant({ tenantId, grantId, action }) {
+/** 校验外部传入的 grant：存在性 / 归属 / 持有人 / 状态 / 有效期 / scope 逐项核对 */
+export async function validateGrant({ tenantId, grantId, action, actorId }) {
   const grant = await store.getGrant(tenantId, grantId);
   if (!grant) throw Errors.notFound('授权不存在');
   if (grant.action_id !== action.id) {
     throw Errors.forbidden('授权与动作不匹配', { code: 'GRANT_SCOPE_MISMATCH' });
+  }
+  // H-2 安全 review：持有人绑定——grant 只能由被签发人消费（fail-closed：历史 NULL 视为无效）
+  if (!grant.granted_to || grant.granted_to !== actorId) {
+    await store.setGrantStatus(tenantId, grant.id, 'revoked');
+    logger.warn('business grant holder mismatch, revoked', { grant: grant.id, actor: actorId });
+    throw Errors.forbidden('授权持有人与当前执行人不一致，已吊销', { code: 'GRANT_HOLDER_MISMATCH' });
   }
   if (grant.status !== 'active') {
     throw Errors.forbidden(`授权不可用: ${grant.status}`, { code: 'GRANT_NOT_ACTIVE' });
@@ -199,8 +209,12 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
     if (!planApproval || !planApproval.approver_id) {
       throw Errors.forbidden('高风险动作缺少审批记录', { code: 'PLAN_APPROVAL_REQUIRED' });
     }
-    if (plan.created_by && planApproval.approver_id === plan.created_by) {
-      throw Errors.forbidden('审批人与计划创建人必须职责分离', { code: 'SOD_VIOLATION' });
+    // M-6 业务 review：SoD 基准统一为意图创建人（与 approvePlan 一致）。
+    // plan.created_by 与 intent.created_by 理论同源，但字段不同源会导致审计口径不统一。
+    const intent = await store.getIntent(tenantId, plan.intent_id);
+    const creatorId = intent?.created_by || plan.created_by;
+    if (creatorId && planApproval.approver_id === creatorId) {
+      throw Errors.forbidden('审批人与意图创建人必须职责分离', { code: 'SOD_VIOLATION' });
     }
   }
 
@@ -215,7 +229,7 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
   let grant;
   let tool;
   if (grantId) {
-    ({ grant, tool } = await validateGrant({ tenantId, grantId, action }));
+    ({ grant, tool } = await validateGrant({ tenantId, grantId, action, actorId }));
   } else {
     ({ grant, tool } = await issueGrant({ tenantId, projectId, actionId: action.id, actorId }));
   }
@@ -262,7 +276,8 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
     // 执行异常（策略拒绝/引擎失败/审批放行失败等）：落库失败 + 对账 + 消费 grant，再抛给上层
     await store.updateBusinessExecution(tenantId, bxn.id, { result_summary: '{}', status: 'failed' });
     await store.updateAction(tenantId, action.id, { status: 'failed' });
-    await store.setGrantStatus(tenantId, grant.id, 'used');
+    // L-5/M1：grant 消费走原子 CAS（active→used），防并发重复消费
+    await store.consumeGrant(tenantId, grant.id);
     await store.insertReconciliation({
       tenantId, projectId, actionId: action.id, executionId: bxn.id,
       reason: `动作执行异常: ${scrubText(e.message).slice(0, 500)}`,
@@ -285,7 +300,9 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
     external_ref: externalRef, result_summary: summary, status: finalStatus,
   });
   await store.updateAction(tenantId, action.id, { status: actionStatus });
-  await store.setGrantStatus(tenantId, grant.id, 'used');
+  if (!(await store.consumeGrant(tenantId, grant.id))) {
+    logger.warn('business grant already consumed at finish', { grant: grant.id, action: action.id });
+  }
   if (finalStatus === 'failed') {
     // P6 引擎内补偿已尝试仍失败（或无补偿）：进对账队列，人工处理
     await store.insertReconciliation({
@@ -328,6 +345,25 @@ async function compensateBusinessAction({ tenantId, projectId, action, actorId, 
   const tools = await listTools(tenantId).catch(() => []);
   const tool = tools.find((t) => t.name === name && t.status === 'active');
   if (!tool) return fail('compensation-tool-unavailable', `补偿工具 ${name} 未注册或已停用`);
+  // M-9 业务 review：补偿原来直调 executeOne，完全绕过 grant/审批/幂等。
+  // 现在：签发一次性内部 grant（持有人=回滚发起人，TTL 5 分钟，scope 绑定补偿工具+参数），
+  // 用 CAS done→compensated 认领（并发重复补偿只认领一次 → 幂等），执行后立即消费 grant。
+  const grant = await store.insertGrant({
+    tenantId, projectId, actionId: action.id,
+    scope: { tool_id: tool.id, tool_action: BUSINESS_TOOL_ACTION, args_hash: hashArgs(action.args) },
+    expiresAt: nowMs() + 5 * 60 * 1000,
+    createdBy: actorId, grantedTo: actorId,
+  });
+  const claimed = await db().run(
+    `UPDATE business_actions SET status='compensated', updated_at=?
+     WHERE id=? AND tenant_id=? AND status='done'`,
+    [nowMs(), action.id, tenantId]);
+  if (claimed.changes === 0) {
+    // 已被认领/补偿过：幂等跳过，回收 grant
+    await store.setGrantStatus(tenantId, grant.id, 'revoked');
+    logger.info('business compensation deduplicated', { action: action.id });
+    return { compensated: true, deduplicated: true };
+  }
   try {
     // 补偿走本地同步执行（与 P6 runCompensations 同哲学）：可预期、不嵌套审批；
     // 密钥走 vault_ref，args 已脱敏校验
@@ -335,16 +371,20 @@ async function compensateBusinessAction({ tenantId, projectId, action, actorId, 
       tool, action: BUSINESS_TOOL_ACTION, args: action.args,
       timeoutMs: Number(config.MCP_TIMEOUT_MS) || 30000,
     });
-    await store.updateAction(tenantId, action.id, { status: 'compensated' });
+    await store.consumeGrant(tenantId, grant.id);
     await tryAudit({
       tenantId, projectId, actorId, traceId: c.traceId,
       action: 'business.action.compensate', resourceKind: 'business_action', resourceId: action.id,
-      payload: { compensation_tool: name },
+      payload: { compensation_tool: name, grant_id: grant.id },
     });
     logger.info('business plan rollback compensated', { action: action.id, tool: name });
     return { compensated: true };
   } catch (e) {
-    // 补偿本身失败：如实进对账，不静默
+    // 补偿本身失败：状态回滚为 done（允许后续重试补偿），如实进对账，不静默
+    await store.consumeGrant(tenantId, grant.id);
+    await db().run(
+      `UPDATE business_actions SET status='done', updated_at=? WHERE id=? AND tenant_id=? AND status='compensated'`,
+      [nowMs(), action.id, tenantId]);
     return fail('compensation-failed', e.message);
   }
 }

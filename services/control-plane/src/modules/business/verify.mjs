@@ -54,6 +54,12 @@ function retryDelayMs() {
   const n = Number(config.BUSINESS_VERIFY_RETRY_DELAY_MS);
   return Number.isFinite(n) && n >= 0 ? n : 1500;
 }
+/** M-13 业务 review：同步重试必须有总时长熔断（否则 10 次×30s 阻塞 HTTP 请求 5 分钟）。
+ *  默认 120s，可配 BUSINESS_VERIFY_TOTAL_TIMEOUT_MS；超时后按"无定论"转人工核查。 */
+function totalTimeoutMs() {
+  const n = Number(config.BUSINESS_VERIFY_TOTAL_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 120 * 1000;
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- 占位符解析 ----------
@@ -248,7 +254,11 @@ export async function verifyExecution({ tenantId, projectId, executionId, actorI
   let readback = null;
   let readErr = null;
   let n = 0;
+  const deadline = Date.now() + totalTimeoutMs();
+  let timedOut = false;
   for (; n < attempts(); n += 1) {
+    // 总时长熔断：超时不再发起新的 read-back，直接按"无定论"处理
+    if (Date.now() >= deadline) { timedOut = true; break; }
     try {
       // eslint-disable-next-line no-await-in-loop
       readback = await executeOne({ tool, action: toolAction, args: verifyArgs, timeoutMs });
@@ -270,7 +280,9 @@ export async function verifyExecution({ tenantId, projectId, executionId, actorI
     }
   }
   if (!readback) {
-    const why = `read-back ${n} 次未获定论（${scrubText(readErr?.message || '未知错误').slice(0, 300)}），转人工核查`;
+    const why = timedOut
+      ? `read-back 触发总时长熔断（>${totalTimeoutMs()}ms），转人工核查`
+      : `read-back ${n} 次未获定论（${scrubText(readErr?.message || '未知错误').slice(0, 300)}），转人工核查`;
     return finish('unverifiable', {
       reason: why, tool: spec.tool, attempts: n,
       ...(await ensureRecon({ tenantId, projectId, actionId: action.id, executionId: bxn.id, reason: why, actorId })
@@ -309,3 +321,5 @@ export async function verifyExecution({ tenantId, projectId, executionId, actorI
 export async function consumeExternalEvent() {
   throw Errors.badRequest('事件消费通道尚未实现（扩展点），请使用 read-back 验证', { code: 'NOT_IMPLEMENTED' });
 }
+
+export const __internal = { totalTimeoutMs, retryDelayMs, attempts };

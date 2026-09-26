@@ -225,7 +225,7 @@ test('grant scope 不匹配被拒并吊销（工具被篡改的 TOCTOU）', asyn
   const evil = await bizStore.insertGrant({
     tenantId: tenant.id, projectId: project.id, actionId: action.id,
     scope: { tool_id: 'tool_evil', tool_action: 'execute', args_hash: 'deadbeef' },
-    expiresAt: Date.now() + 600000, createdBy: opActor.id,
+    expiresAt: Date.now() + 600000, createdBy: opActor.id, grantedTo: opActor.id,
   });
   const { status, json } = await post(
     `${B(project.id)}/actions/${action.id}/execute`, opSecret, { grant_id: evil.id });
@@ -492,4 +492,98 @@ test('P6 审批放行失败不留僵尸：审批人掉角色 → 动作 failed +
   assert.ok(recs.some((x) => x.action_id === action.id), '应进对账');
   // 恢复 admin 角色，不影响后续测试（本文件最后一个用 admin 的测试已过，此处保底）
   await store.bindRole(tenant.id, adminActor.id, null, 'admin');
+});
+
+// ---------- Review-R4 回归（V2.0 执行链加固） ----------
+test('H-2 grant 持有人绑定：他人盗用被拒并吊销', async () => {
+  const op2 = await mkActorWithKey(tenant.id, 'bex-op2', project.id, 'operator');
+  const { action } = await readyPlan('采购计算器，金额120元');
+  const { grant } = await execMod.issueGrant({
+    tenantId: tenant.id, projectId: project.id, actionId: action.id, actorId: opActor.id,
+  });
+  assert.equal(grant.granted_to, opActor.id);
+  // op2 拿着 op 的 grant 执行 → 持有人不一致
+  const { status, json } = await post(
+    `${B(project.id)}/actions/${action.id}/execute`, op2.secret, { grant_id: grant.id });
+  assert.equal(status, 403);
+  assert.equal(codeOf(json), 'GRANT_HOLDER_MISMATCH');
+  const g = await bizStore.getGrant(tenant.id, grant.id);
+  assert.equal(g.status, 'revoked', '盗用尝试必须吊销 grant');
+});
+
+test('H-3 失败计划可重置：reset 后重新执行走通', async () => {
+  const { planId, a1, a2, a3 } = await buildRollbackPlan();
+  const ex1 = await post(`${B(project.id)}/plans/${planId}/execute`, opSecret, {});
+  assert.equal(ex1.status, 200);
+  assert.equal(ex1.json.data.failed_action_id, a3.id);
+  const beforeKeys = new Map();
+  for (const a of [a1, a2, a3]) beforeKeys.set(a.id, (await bizStore.getAction(tenant.id, a.id)).idempotency_key);
+  // reset：失败/补偿动作回到 approved + 新幂等键
+  const r = await post(`${B(project.id)}/plans/${planId}/reset`, opSecret, {});
+  assert.equal(r.status, 200);
+  assert.equal(r.json.data.reset.length, 3);
+  for (const item of r.json.data.reset) {
+    assert.equal(item.status, 'approved');
+    assert.notEqual(item.idempotency_key, beforeKeys.get(item.action_id), '幂等键必须轮换，否则复用旧失败记录');
+  }
+  // 修复 a3 的工具指向（模拟人工修复后），重新执行应整体成功
+  const svc = await import('../src/modules/execution/service.mjs');
+  const erp = (await svc.listTools(tenant.id)).find((t) => t.name === 'erp.purchase_order');
+  await db().query('UPDATE business_actions SET tool_ref=?, tool_name=? WHERE id=?', [erp.id, erp.name, a3.id]);
+  const ex2 = await post(`${B(project.id)}/plans/${planId}/execute`, opSecret, {});
+  assert.equal(ex2.status, 200);
+  assert.equal(ex2.json.data.failed_action_id, null);
+  const plan = await bizStore.getPlan(tenant.id, planId);
+  const intent = await bizStore.getIntent(tenant.id, plan.intent_id);
+  assert.equal(intent.status, 'done');
+  // 全部成功后无失败动作可重置 → 400 NOTHING_TO_RESET
+  const r2 = await post(`${B(project.id)}/plans/${planId}/reset`, opSecret, {});
+  assert.equal(r2.status, 400);
+  assert.equal(codeOf(r2.json), 'NOTHING_TO_RESET');
+});
+
+test('M-9 补偿走一次性授权 + 认领幂等：重复执行计划不重复补偿', async () => {
+  fakeCalls.length = 0;
+  const { planId } = await buildRollbackPlan();
+  const ex1 = await post(`${B(project.id)}/plans/${planId}/execute`, opSecret, {});
+  assert.equal(ex1.status, 200);
+  assert.ok(ex1.json.data.failed_action_id);
+  const compCalls1 = fakeCalls.filter((c) => c.path === '/comp1' || c.path === '/comp2').length;
+  assert.equal(compCalls1, 2, 'a2、a1 各补偿一次');
+  // 补偿动作签发了一次性内部 grant 并已消费
+  const grants = await db().query(
+    `SELECT * FROM credential_grants WHERE tenant_id=? AND action_id IN
+     (SELECT id FROM business_actions WHERE plan_id=?) AND granted_to=?`,
+    [tenant.id, planId, opActor.id]);
+  assert.ok(grants.length >= 2, '补偿应有一对一的一次性 grant');
+  assert.ok(grants.every((g) => ['used', 'revoked'].includes(g.status)), '补偿 grant 不得残留 active');
+  // 再次执行同一计划：已补偿动作不可重复执行，也不触发新的补偿调用
+  const ex2 = await post(`${B(project.id)}/plans/${planId}/execute`, opSecret, {});
+  assert.equal(ex2.status, 200);
+  const compCalls2 = fakeCalls.filter((c) => c.path === '/comp1' || c.path === '/comp2').length;
+  assert.equal(compCalls2, compCalls1, '重复执行不得产生新的补偿外部调用');
+});
+
+test('M-4 批准原子性：计划/审批记录/动作/意图四表一致，重复批准被拒', async () => {
+  const { planId } = await readyPlan('采购白板，金额500元', {});
+  const ap1 = await post(`${B(project.id)}/plans/${planId}/approve`, adminSecret, {});
+  assert.equal(ap1.status, 200);
+  const plan = await bizStore.getPlan(tenant.id, planId);
+  assert.equal(plan.status, 'approved');
+  const approval = await bizStore.getPlanApproval(tenant.id, planId);
+  assert.ok(approval && approval.approver_id === adminActor.id, '审批记录必须落库');
+  const acts = await bizStore.listActions(tenant.id, planId);
+  assert.ok(acts.every((a) => a.status === 'approved'), 'dryrun_ok 动作应全部 approved');
+  const intent = await bizStore.getIntent(tenant.id, plan.intent_id);
+  assert.equal(intent.status, 'approved');
+  // 重复批准：状态机前置检查拒绝（CAS 是并发双重批准的第二道防线）
+  const ap2 = await post(`${B(project.id)}/plans/${planId}/approve`, adminSecret, {});
+  assert.equal(ap2.status, 400);
+  assert.equal(codeOf(ap2.json), 'DRYRUN_REQUIRED');
+});
+
+test('M-13 read-back 同步重试有总时长熔断默认值', async () => {
+  const verify = await import('../src/modules/business/verify.mjs');
+  assert.equal(verify.__internal.totalTimeoutMs(), 120000);
+  assert.ok(verify.__internal.attempts() >= 1 && verify.__internal.attempts() <= 10);
 });

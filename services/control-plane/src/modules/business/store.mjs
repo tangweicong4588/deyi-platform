@@ -3,6 +3,7 @@
  * 状态机与计划逻辑在 plan.mjs，这里只做数据访问。
  */
 import { newId, nowMs, assertId } from '../../kernel/ids.mjs';
+import { Errors } from '../../kernel/errors.mjs';
 import { db } from '../../db/index.mjs';
 
 export const INTENT_STATUSES = new Set(['draft', 'planned', 'approved', 'executing', 'done', 'rejected', 'cancelled']);
@@ -162,6 +163,32 @@ export async function getAction(tenantId, id) {
   return normAction(rows[0]) || null;
 }
 
+/**
+ * H-3 业务 review：失败动作重置为可重试。
+ * 仅 failed/compensated/executing 可重置 → approved + 新幂等键（旧键已关联失败的执行记录，
+ * 复用会导致"重复执行直接返回旧失败结果"）。返回重置后的动作；状态不符抛 409。
+ */
+export async function resetActionForRetry(tenantId, actionId, newIdempotencyKey) {
+  const upd = await db().run(
+    `UPDATE business_actions SET status='approved', idempotency_key=?, updated_at=?
+     WHERE id=? AND tenant_id=? AND status IN ('failed','compensated','executing')`,
+    [newIdempotencyKey, nowMs(), actionId, tenantId]);
+  if (upd.changes === 0) {
+    const cur = await getAction(tenantId, actionId).catch(() => null);
+    throw Errors.conflict(
+      `动作当前状态 ${cur?.status || '未知'} 不允许重置（仅 failed/compensated/executing 可重置）`,
+      { code: 'INVALID_ACTION_STATE' });
+  }
+  return getAction(tenantId, actionId);
+}
+
+/** 该动作已有的执行记录数（重试时生成第 N+1 个幂等键） */
+export async function countActionExecutions(tenantId, actionId) {
+  const rows = await db().query(
+    'SELECT COUNT(*) AS n FROM action_executions WHERE tenant_id=? AND action_id=?', [tenantId, actionId]);
+  return Number(rows[0]?.n || 0);
+}
+
 // ---------- 计划审批记录（V2.0-B：高风险动作执行的硬检查依据） ----------
 export async function recordPlanApproval({ tenantId, planId, approverId }) {
   const now = nowMs();
@@ -188,17 +215,17 @@ export async function getPlanApproval(tenantId, planId) {
 // ---------- 短期授权（credential_grants） ----------
 const normGrant = (r) => r && { ...r, scope: J.parse(r.scope, {}) };
 
-export async function insertGrant({ tenantId, projectId, actionId, scope, expiresAt, createdBy }) {
+export async function insertGrant({ tenantId, projectId, actionId, scope, expiresAt, createdBy, grantedTo }) {
   const row = {
     id: newId('grant'), tenant_id: tenantId, project_id: projectId, action_id: actionId,
     scope: J.str(scope), expires_at: expiresAt, status: 'active', used_at: null,
-    created_by: createdBy || null, created_at: nowMs(),
+    created_by: createdBy || null, granted_to: grantedTo || null, created_at: nowMs(),
   };
   await db().query(
-    `INSERT INTO credential_grants(id,tenant_id,project_id,action_id,scope,expires_at,status,used_at,created_by,created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO credential_grants(id,tenant_id,project_id,action_id,scope,expires_at,status,used_at,created_by,granted_to,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
     [row.id, row.tenant_id, row.project_id, row.action_id, row.scope, row.expires_at,
-     row.status, row.used_at, row.created_by, row.created_at]);
+     row.status, row.used_at, row.created_by, row.granted_to, row.created_at]);
   return normGrant(row);
 }
 
@@ -215,6 +242,17 @@ export async function setGrantStatus(tenantId, id, status) {
      WHERE id=? AND tenant_id=?`,
     [status, status, now, id, tenantId]);
   return getGrant(tenantId, id);
+}
+
+/**
+ * 原子消费 grant：active→used 的 CAS（L-5 安全 / M1 数据 review）。
+ * 返回 true=本次消费成功；false=已被消费/过期/吊销（调用方应视为并发冲突，拒绝重复执行）。
+ */
+export async function consumeGrant(tenantId, id) {
+  const upd = await db().run(
+    `UPDATE credential_grants SET status='used', used_at=? WHERE id=? AND tenant_id=? AND status='active'`,
+    [nowMs(), id, tenantId]);
+  return upd.changes === 1;
 }
 
 // ---------- 执行记录（action_executions） ----------
