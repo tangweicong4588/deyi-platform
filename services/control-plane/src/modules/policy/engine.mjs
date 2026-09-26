@@ -8,7 +8,8 @@
  *   actor:  { id, kind, roles: [{project_id, role}] },
  *   tenant: { id, status },
  *   project:{ id } | null,
- *   action: 'model.invoke' | 'tool.invoke' | 'knowledge.read' | 'ontology.publish' | 'admin.*' ...,
+ *   action: 'model.invoke' | 'tool.invoke' | 'knowledge.read' | 'ontology.publish' |
+ *           'delivery.read' | 'delivery.write' | 'admin.*' ...,
  *   resource: { kind, id?, risk?, projectId?, ... },
  *   context: { estimatedCost?, budgetRemaining?, ... }  // 调用方提供的事实
  * }
@@ -99,6 +100,18 @@ export function decideBuiltin(input) {
     return rankOf(actor.roles, project?.id) >= 1
       ? allow('工具注册（operator+）')
       : deny('工具注册需要 operator 角色');
+  }
+
+  // R6: 交付域 —— delivery.read 需 viewer+，delivery.write 需 operator+
+  if (action === 'delivery.read') {
+    return rankOf(actor.roles, project?.id) >= 0
+      ? allow('交付域读取（viewer+）')
+      : deny('交付域读取需要 viewer 角色');
+  }
+  if (action === 'delivery.write') {
+    return rankOf(actor.roles, project?.id) >= 1
+      ? allow('交付域写入（operator+）')
+      : deny('交付域写入需要 operator 角色');
   }
 
   // 默认：拒绝未知动作（fail-closed）
