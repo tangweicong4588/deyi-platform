@@ -361,3 +361,40 @@ test('R6-3 outbox 补记使用入队时固化的账期（不串月）', async ()
   const curB = await gstore.getBudget(tenant.id, null, curPk);
   assert.equal(curB?.used_tokens || 0, curBefore, '当前账期预算不应被串改');
 });
+
+test('R6-4 老 outbox payload（无 periodKey）按 callRow.created_at 账期回放', async () => {
+  const { reconcileUsageOutbox } = await import('../src/modules/gateway/routes.mjs');
+  // 构造上个月的时间戳（本地时区口径与 periodKeyFromCreatedAt 一致）
+  const lastMonth = new Date(); lastMonth.setMonth(lastMonth.getMonth() - 1);
+  const oldPk = gstore.periodKeyFromCreatedAt(lastMonth.getTime());
+  const curPk = gstore.currentPeriodKey();
+  assert.ok(oldPk && oldPk !== curPk, `上月账期 ${oldPk} 应与当前 ${curPk} 不同`);
+  await db().query(
+    `INSERT INTO budgets(id,tenant_id,project_id,period,cost_limit_cents,token_limit,
+     used_cost_cents,used_tokens,period_key,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ['bdg_oldpayload_test', tenant.id, null, 'monthly', 100000, 1000000, 0, 0, oldPk, 'active', Date.now(), Date.now()]);
+  const curBefore = (await gstore.getBudget(tenant.id, null, curPk))?.used_tokens || 0;
+  const callRow = {
+    id: 'call_oldpayload_test', tenant_id: tenant.id, project_id: null, actor_id: actor.id,
+    trace_id: 't-oldpayload', model: 'deyi-default', litellm_model: 'fake', endpoint: '/x',
+    prompt_tokens: 4, completion_tokens: 3, total_tokens: 7, cost_cents: 2,
+    latency_ms: 1, status: 'ok', cached: 0, created_at: lastMonth.getTime(),
+  };
+  // 老格式 payload：只有 callRow，没有 periodKey
+  await gstore.enqueueUsageOutbox(tenant.id, { callRow }, 'legacy payload');
+  const res = await reconcileUsageOutbox({ limit: 100 });
+  assert.equal(res.fail, 0, '补记不应失败');
+  const oldB = await gstore.getBudget(tenant.id, null, oldPk);
+  assert.equal(oldB.used_tokens, 7, '应记入调用发生月份的账期，而非当前月');
+  const curB = await gstore.getBudget(tenant.id, null, curPk);
+  assert.equal(curB?.used_tokens || 0, curBefore, '当前账期预算不应被串改');
+});
+
+test('R6-5 periodKeyFromCreatedAt 非法输入返回 null', () => {
+  assert.equal(gstore.periodKeyFromCreatedAt(undefined), null);
+  assert.equal(gstore.periodKeyFromCreatedAt(null), null);
+  assert.equal(gstore.periodKeyFromCreatedAt('not-a-time'), null);
+  assert.equal(gstore.periodKeyFromCreatedAt(-1), null);
+  assert.match(gstore.periodKeyFromCreatedAt(Date.now()), /^\d{4}-\d{2}$/);
+});

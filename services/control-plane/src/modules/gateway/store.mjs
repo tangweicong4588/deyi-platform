@@ -73,6 +73,18 @@ export function currentPeriodKey() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+/**
+ * R7 遗留（V2.1-E）：从调用发生时间推导账期（与 currentPeriodKey 同一本地时区口径）。
+ * 老 outbox payload 没有 periodKey 时用它回放，避免跨月补记串到当前账期。
+ * 输入非法时返回 null，调用方再回退 currentPeriodKey()。
+ */
+export function periodKeyFromCreatedAt(createdAt) {
+  const t = Number(createdAt);
+  if (!Number.isFinite(t) || t <= 0) return null;
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
 export async function getBudget(tenantId, projectId, periodKey, period = 'monthly') {
   const rows = await db().query(
     `SELECT * FROM budgets WHERE tenant_id=? AND COALESCE(project_id,'')=COALESCE(?,'')

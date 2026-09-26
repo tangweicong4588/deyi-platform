@@ -61,11 +61,14 @@ async function persistUsage({ tenantId, project, actorId, traceId, model, endpoi
     prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens,
     cost_cents: costCents, latency_ms: latencyMs, status, cached: cached ? 1 : 0,
   };
+  // R7 遗留（V2.1-E）：账期在函数起点固化一次。实时记账与失败入队共用同一值，
+  // 避免极端跨月瞬间两次 currentPeriodKey() 取到不同月份。
+  const periodKey = gstore.currentPeriodKey();
   try {
     // R6 数据 review：记账原子单元——call + 两级预算同一事务提交，
     // 任一步失败整体回滚，不再有"call 已落库但预算没累加"的中间态。
     await gstore.persistUsageAtomic({
-      callRow, tenantId, projectId: project?.id || null, periodKey: gstore.currentPeriodKey(),
+      callRow, tenantId, projectId: project?.id || null, periodKey,
     });
     return { totalTokens, costCents, meteringDeferred: false };
   } catch (e) {
@@ -75,7 +78,7 @@ async function persistUsage({ tenantId, project, actorId, traceId, model, endpoi
     try {
       // R6 复核：账期必须在入队时固化。补记可能跨月执行，若用补记时的 currentPeriodKey()，
       // 上月积压的调用会被记入本月预算桶。payload 自带 periodKey，reconcile 原样回放。
-      await gstore.enqueueUsageOutbox(tenantId, { callRow, periodKey: gstore.currentPeriodKey() }, e.message);
+      await gstore.enqueueUsageOutbox(tenantId, { callRow, periodKey }, e.message);
     } catch (e2) {
       // 连 outbox 都写不进：只剩结构化日志兜底，仍不转 500
       logger.error('gateway metering outbox write failed — manual reconcile from logs required', {
@@ -104,8 +107,9 @@ export async function reconcileUsageOutbox({ limit = 100 } = {}) {
         callRow,
         tenantId: callRow.tenant_id,
         projectId: callRow.project_id || null,
-        // 用入队时固化的账期回放；老 payload 缺 periodKey 时回退到当前账期（兼容）
-        periodKey: periodKey || gstore.currentPeriodKey(),
+        // 用入队时固化的账期回放；老 payload 缺 periodKey 时优先从 callRow.created_at
+        // 推导（调用发生月份），再兜底当前账期——跨月补记不串账期。
+        periodKey: periodKey || gstore.periodKeyFromCreatedAt(callRow.created_at) || gstore.currentPeriodKey(),
       });
       await gstore.markUsageOutboxProcessed(row.id);
       ok++;
