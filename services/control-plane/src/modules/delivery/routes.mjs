@@ -15,6 +15,7 @@ import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
 import { logger } from '../../kernel/logging.mjs';
 import * as svc from './service.mjs';
+import * as pipe from './pipeline.mjs';
 
 async function scopedProject(req, minRank, opName) {
   const c = ctx();
@@ -227,6 +228,124 @@ export function registerDeliveryRoutes(app) {
     if (!status) throw Errors.badRequest('status 必填');
     const out = await withTenant(tenantId, () => svc.transitionPipelineRun(
       tenantId, project.id, req.params.id, status, gateDecision));
+    sendJson(res, 200, { data: out });
+  });
+
+  // ---- V1.0-B 五阶段流水线编排 ----
+  app.post(R('/delivery/change-packages/:id/pipeline/start'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'pipeline.start');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pipeline' } });
+    const out = await withTenant(tenantId, () => pipe.startPipeline({
+      tenantId, projectId: project.id, actorId: actor.id, changePackageId: req.params.id,
+    }));
+    sendJson(res, out.created ? 201 : 200, { data: out });
+  });
+
+  app.get(R('/delivery/change-packages/:id/pipeline'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'pipeline.view');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'pipeline' } });
+    const out = await withTenant(tenantId, () => pipe.getPipelineView({
+      tenantId, projectId: project.id, changePackageId: req.params.id,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  app.get(R('/delivery/pipeline-runs/:runId'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'pipeline.run.get');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'pipeline_run' } });
+    const out = await withTenant(tenantId, () => pipe.getPipelineRunDetail({
+      tenantId, projectId: project.id, runId: req.params.runId,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  app.post(R('/delivery/pipeline-runs/:runId/advance'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'pipeline.advance');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pipeline_run' } });
+    const { decision, evidence } = req.body || {};
+    const out = await withTenant(tenantId, () => pipe.advanceStage({
+      tenantId, projectId: project.id, actorId: actor.id,
+      runId: req.params.runId, decision: decision || {}, evidence: evidence || {},
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  // 事实快照（facts 阶段手动登记）
+  app.post(R('/delivery/pipeline-runs/:runId/fact-snapshot'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'fact.snapshot.record');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'fact_snapshot' } });
+    const out = await withTenant(tenantId, () => pipe.recordFactSnapshot({
+      tenantId, projectId: project.id, actorId: actor.id, runId: req.params.runId, body: req.body || {},
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  app.get(R('/delivery/pipeline-runs/:runId/fact-snapshot'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'fact.snapshot.get');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'fact_snapshot' } });
+    const detail = await withTenant(tenantId, () => pipe.getPipelineRunDetail({
+      tenantId, projectId: project.id, runId: req.params.runId,
+    }));
+    sendJson(res, 200, { data: detail.related.fact_snapshot });
+  });
+
+  // 澄清记录（clarify 阶段）
+  app.post(R('/delivery/pipeline-runs/:runId/clarifications'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'clarify.ask');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'clarification' } });
+    const out = await withTenant(tenantId, () => pipe.askClarification({
+      tenantId, projectId: project.id, actorId: actor.id, runId: req.params.runId, body: req.body || {},
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  app.get(R('/delivery/pipeline-runs/:runId/clarifications'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'clarify.list');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'clarification' } });
+    const detail = await withTenant(tenantId, () => pipe.getPipelineRunDetail({
+      tenantId, projectId: project.id, runId: req.params.runId,
+    }));
+    sendJson(res, 200, { data: detail.related.clarifications });
+  });
+
+  app.post(R('/delivery/pipeline-runs/:runId/clarifications/:clfId/answer'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'clarify.answer');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'clarification' } });
+    const out = await withTenant(tenantId, () => pipe.answerClarification({
+      tenantId, projectId: project.id, actorId: actor.id,
+      runId: req.params.runId, clfId: req.params.clfId, body: req.body || {},
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  app.post(R('/delivery/pipeline-runs/:runId/clarifications/:clfId/to-ac'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'clarify.to-ac');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'clarification' } });
+    const out = await withTenant(tenantId, () => pipe.clarificationToAC({
+      tenantId, projectId: project.id, actorId: actor.id,
+      runId: req.params.runId, clfId: req.params.clfId, body: req.body || {},
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  // 门禁例外审批
+  app.post(R('/delivery/pipeline-runs/:runId/gate-exceptions'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'gate.exception.request');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'gate_exception' } });
+    const out = await withTenant(tenantId, () => pipe.requestGateException({
+      tenantId, projectId: project.id, actorId: actor.id, runId: req.params.runId, body: req.body || {},
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  app.post(R('/delivery/gate-exceptions/:gexId/decide'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, roles } = await scopedProject(req, 1, 'gate.exception.decide');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'gate_exception' } });
+    const { approved, reason } = req.body || {};
+    const out = await withTenant(tenantId, () => pipe.decideGateException({
+      tenantId, projectId: project.id, actorId: actor.id, roles,
+      gexId: req.params.gexId, approved: !!approved, reason,
+    }));
     sendJson(res, 200, { data: out });
   });
 }

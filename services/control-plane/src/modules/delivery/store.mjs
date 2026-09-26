@@ -3,6 +3,7 @@
  * 状态机在 service.mjs，这里只做数据访问。
  */
 import { newId, nowMs, assertId } from '../../kernel/ids.mjs';
+import { Errors } from '../../kernel/errors.mjs';
 import { db } from '../../db/index.mjs';
 
 export const REQ_KINDS = new Set(['feature', 'bug', 'ops']);
@@ -263,4 +264,121 @@ export async function setPipelineRun(tenantId, id, { status, gateDecision, start
   args.push(id, tenantId);
   await db().query(`UPDATE pipeline_runs SET ${sets.join(',')} WHERE id=? AND tenant_id=?`, args);
   return getPipelineRun(tenantId, id);
+}
+
+// ---------- fact_snapshots（snp_）：事实阶段手动登记的基线 ----------
+const normSnp = (r) => r && {
+  ...r,
+  environment: parseJson(r.environment, {}),
+  dependencies: parseJson(r.dependencies, {}),
+  unknown_items: parseJson(r.unknown_items, []),
+};
+
+/** 登记即覆盖：每个 facts 阶段运行只认一条快照 */
+export async function upsertFactSnapshot({ tenantId, projectId, pipelineRunId, baselineCommit,
+  environment = {}, dependencies = {}, unknownItems = [], recordedBy }) {
+  const now = nowMs();
+  const row = await getFactSnapshot(tenantId, pipelineRunId).catch(() => null);
+  if (row) {
+    await db().query(
+      `UPDATE fact_snapshots SET baseline_commit=?, environment=?, dependencies=?, unknown_items=?,
+        recorded_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
+      [baselineCommit, JSON.stringify(environment), JSON.stringify(dependencies),
+        JSON.stringify(unknownItems), recordedBy, now, row.id, tenantId]);
+    return getFactSnapshot(tenantId, pipelineRunId);
+  }
+  const id = newId('snp');
+  await db().query(
+    `INSERT INTO fact_snapshots(id,tenant_id,project_id,pipeline_run_id,baseline_commit,environment,
+      dependencies,unknown_items,recorded_by,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, tenantId, projectId, pipelineRunId, baselineCommit, JSON.stringify(environment),
+      JSON.stringify(dependencies), JSON.stringify(unknownItems), recordedBy, now, now]);
+  return getFactSnapshot(tenantId, pipelineRunId);
+}
+
+export async function getFactSnapshot(tenantId, pipelineRunId) {
+  const rows = await db().query(
+    'SELECT * FROM fact_snapshots WHERE tenant_id=? AND pipeline_run_id=?', [tenantId, pipelineRunId]);
+  return normSnp(rows[0]) || null;
+}
+
+// ---------- clarifications（clf_）：澄清问题与回答 ----------
+const normClf = (r) => r && { ...r, impacts_implementation: r.impacts_implementation === 1 };
+
+export async function createClarification({ tenantId, projectId, pipelineRunId, requirementId = null,
+  question, impactsImplementation = false, createdBy }) {
+  const id = newId('clf');
+  const now = nowMs();
+  await db().query(
+    `INSERT INTO clarifications(id,tenant_id,project_id,pipeline_run_id,requirement_id,question,
+      answer,impacts_implementation,created_by,answered_by,created_at,answered_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, tenantId, projectId, pipelineRunId, requirementId, question, null,
+      impactsImplementation ? 1 : 0, createdBy, null, now, null]);
+  return getClarification(tenantId, id);
+}
+
+export async function getClarification(tenantId, id) {
+  assertId('clf', id);
+  const rows = await db().query(
+    'SELECT * FROM clarifications WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normClf(rows[0]) || null;
+}
+
+export async function listClarifications(tenantId, pipelineRunId) {
+  const rows = await db().query(
+    'SELECT * FROM clarifications WHERE tenant_id=? AND pipeline_run_id=? ORDER BY created_at',
+    [tenantId, pipelineRunId]);
+  return rows.map(normClf);
+}
+
+export async function answerClarification(tenantId, id, { answer, answeredBy }) {
+  const now = nowMs();
+  await db().query(
+    'UPDATE clarifications SET answer=?, answered_by=?, answered_at=? WHERE id=? AND tenant_id=?',
+    [answer, answeredBy, now, id, tenantId]);
+  return getClarification(tenantId, id);
+}
+
+// ---------- gate_exceptions（gex_）：门禁例外审批（复用 P6 审批语义） ----------
+const normGex = (r) => r && { ...r, missing_items: parseJson(r.missing_items, []) };
+
+export async function createGateException({ tenantId, projectId, pipelineRunId, stage,
+  missingItems = [], reason = '', requestedBy }) {
+  const id = newId('gex');
+  const now = nowMs();
+  await db().query(
+    `INSERT INTO gate_exceptions(id,tenant_id,project_id,pipeline_run_id,stage,missing_items,reason,
+      status,requested_by,decided_by,decided_at,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, tenantId, projectId, pipelineRunId, stage, JSON.stringify(missingItems), reason,
+      'pending', requestedBy, null, null, now]);
+  return getGateException(tenantId, id);
+}
+
+export async function getGateException(tenantId, id) {
+  assertId('gex', id);
+  const rows = await db().query(
+    'SELECT * FROM gate_exceptions WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normGex(rows[0]) || null;
+}
+
+export async function listGateExceptions(tenantId, pipelineRunId, { status } = {}) {
+  let sql = 'SELECT * FROM gate_exceptions WHERE tenant_id=? AND pipeline_run_id=?';
+  const args = [tenantId, pipelineRunId];
+  if (status) { sql += ' AND status=?'; args.push(status); }
+  sql += ' ORDER BY created_at';
+  return (await db().query(sql, args)).map(normGex);
+}
+
+/** 原子 CAS：只有 pending 的例外单能被决议（防并发双重决议，复用 P6 decideApproval 模式） */
+export async function decideGateException(tenantId, id, { approved, decidedBy, reason }) {
+  const now = nowMs();
+  const upd = await db().run(
+    `UPDATE gate_exceptions SET status=?, decided_by=?, reason=?, decided_at=?
+     WHERE id=? AND tenant_id=? AND status='pending'`,
+    [approved ? 'approved' : 'rejected', decidedBy, reason || null, now, id, tenantId]);
+  if (upd.changes === 0) throw Errors.conflict('例外审批单已被处理（可能并发决议）');
+  return getGateException(tenantId, id);
 }

@@ -9,6 +9,7 @@
  * 流水线：pending → running → gated → passed | failed；running → failed
  */
 import { Errors } from '../../kernel/errors.mjs';
+import { tryAudit } from '../evidence/audit.mjs';
 import * as store from './store.mjs';
 
 const REQ_TRANSITIONS = {
@@ -119,7 +120,16 @@ export async function transitionRequirement(tenantId, projectId, id, to) {
   if (to === 'verifying' && !(await store.allACsAccepted(tenantId, id))) {
     throw Errors.badRequest('存在未通过的验收标准，无法进入验证阶段', { code: 'AC_NOT_ACCEPTED' });
   }
-  return store.setRequirementStatus(tenantId, id, to);
+  const out = await store.setRequirementStatus(tenantId, id, to);
+  // 需求发布（ready）接入 P7 审计链（best-effort）
+  if (to === 'ready') {
+    await tryAudit({
+      tenantId, projectId, action: 'requirement.publish',
+      resourceKind: 'requirement', resourceId: id,
+      payload: { status: 'ready', kind: r.kind, priority: r.priority },
+    });
+  }
+  return out;
 }
 
 // ---------- acceptance criteria ----------
@@ -181,7 +191,16 @@ export async function transitionChangePackage(tenantId, projectId, id, to, headC
   const c = await getChangePackage(tenantId, projectId, id);
   if (!store.CHG_STATUSES.has(to)) throw Errors.badRequest(`status 非法: ${to}`);
   checkTransition(CHG_TRANSITIONS, c.status, to, '变更包');
-  return store.setChangePackageStatus(tenantId, id, to, headCommit || null);
+  const out = await store.setChangePackageStatus(tenantId, id, to, headCommit || null);
+  // 变更包移交（ready_for_review）接入 P7 审计链（best-effort）
+  if (to === 'ready_for_review') {
+    await tryAudit({
+      tenantId, projectId, action: 'change_package.handover',
+      resourceKind: 'change_package', resourceId: id,
+      payload: { status: 'ready_for_review', branch: c.branch, head_commit: headCommit || c.head_commit },
+    });
+  }
+  return out;
 }
 
 // ---------- artifacts ----------
@@ -213,6 +232,12 @@ export async function transitionPipelineRun(tenantId, projectId, id, to, gateDec
   const p = await getPipelineRun(tenantId, projectId, id);
   if (!store.PIPE_STATUSES.has(to)) throw Errors.badRequest(`status 非法: ${to}`);
   checkTransition(PIPE_TRANSITIONS, p.status, to, '流水线运行');
+  // 门禁防绕过：已绑定变更包的编排运行，其 passed/gated 只能经 advanceStage 门禁产生，
+  // 不允许经静态 PATCH 直接改写（无变更包绑定的 V1.0-A 静态记录不受影响）。
+  if (p.change_package_id && (to === 'passed' || to === 'gated')) {
+    throw Errors.badRequest('编排中的流水线阶段必须经 advance 门禁推进，不能直接改状态',
+      { code: 'GATE_BYPASS_DENIED' });
+  }
   const patch = { status: to };
   if (to === 'running' && !p.started_at) patch.startedAt = Date.now();
   if (['passed', 'failed', 'cancelled'].includes(to) && !p.finished_at) patch.finishedAt = Date.now();
