@@ -99,6 +99,16 @@ async function evalHandoverGate({ tenantId, changePackage }) {
   if (!arts.some((a) => a.kind === 'report')) missing.push('artifact:report');
   if (!String(changePackage.branch || '').trim()) missing.push('branch');
   if (changePackage.status !== 'verifying') missing.push(`change_package_verifying(当前:${changePackage.status})`);
+  // V1.0-E 门禁联动：产物合同结果接入 handover 门禁评估。读取已落库的合同评估结论
+  //（evaluateContract 写入 dod_checklist.contract），未通过且未豁免的项进入缺失清单，
+  // 可经门禁例外审批逐项 waive（与 advanceStage 的覆盖逻辑一致）。
+  // 注意：从未评估过合同的变更包保持 V1.0-B 旧语义（不新增缺失项），避免破坏既有行为。
+  const contract = (changePackage.dod_checklist || {}).contract;
+  if (contract && Array.isArray(contract.items)) {
+    for (const item of contract.items) {
+      if (item.status === 'fail') missing.push(item.key);
+    }
+  }
   return missing;
 }
 
@@ -262,7 +272,7 @@ export async function advanceStage({ tenantId, projectId, actorId, runId, decisi
     const cur = await svc.getChangePackage(tenantId, projectId, chg.id);
     if (cur.status === 'verifying') {
       try {
-        await svc.transitionChangePackage(tenantId, projectId, chg.id, 'ready_for_review');
+        await svc.transitionChangePackage(tenantId, projectId, chg.id, 'ready_for_review', null, { viaPipeline: true });
       } catch (e) {
         // 并发推进：对方已先完成交接 → 视为成功，继续走 run 的 CAS（输家会 409）
         const recheck = await svc.getChangePackage(tenantId, projectId, chg.id);

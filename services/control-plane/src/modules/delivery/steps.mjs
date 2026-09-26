@@ -213,9 +213,13 @@ export async function runStep({ tenantId, projectId, changePackageId, actorId,
     if (policy.acFailed.length) policy.reasons.push(`test 失败，${policy.acFailed.length} 个 auto AC 已标记 failed`);
   }
 
-  // ---- DoD 清单打勾 ----
+  // ---- DoD 清单打勾（V1.0-E：scan 持久化 severities/blocked，供产物合同消费落库证据） ----
   await store.updateDodChecklist(tenantId, changePackageId, {
-    [step]: { passed: !failed, runId: run.id, at: nowMs(), simulated: execResult.simulated },
+    [step]: {
+      passed: !failed, runId: run.id, at: nowMs(), simulated: execResult.simulated,
+      blocked: policy.blocked,
+      ...(step === 'scan' ? { severities: scanSeverities, scanNote } : {}),
+    },
   });
 
   await tryAudit({

@@ -18,6 +18,8 @@ import * as svc from './service.mjs';
 import * as pipe from './pipeline.mjs';
 import * as repo from './repo.mjs';
 import * as stp from './steps.mjs';
+import { evaluateContract } from './contract.mjs';
+import { assemblePackage, getHandoverReport } from './handover.mjs';
 
 async function scopedProject(req, minRank, opName) {
   const c = ctx();
@@ -451,5 +453,41 @@ export function registerDeliveryRoutes(app) {
       tenantId, projectId: project.id, actorId: c.actorId, changePackageId: req.params.id,
     }));
     sendJson(res, 200, { data: out });
+  });
+
+  // ---- V1.0-E 产物合同与交接 ----
+  // 产物合同评估：逐项校验 DoD，输出 contract_result JSON（机读 + 人读）
+  app.post(R('/delivery/change-packages/:id/contract/evaluate'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'contract.evaluate');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'change_package' } });
+    const out = await withTenant(tenantId, () => evaluateContract({
+      tenantId, projectId: project.id, changePackageId: req.params.id, actorId: c.actorId,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  // 变更包组装：合同现场评估通过后生成 manifest/handover/cost 并封存证据包
+  app.post(R('/delivery/change-packages/:id/assemble'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'package.assemble');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'change_package' } });
+    const out = await withTenant(tenantId, () => assemblePackage({
+      tenantId, projectId: project.id, changePackageId: req.params.id, actorId: c.actorId,
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  // 交接报告下载（Markdown；读取时重算 hash 与登记值比对，防篡改）
+  app.get(R('/delivery/change-packages/:id/handover'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'handover.get');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'change_package' } });
+    const out = await withTenant(tenantId, () => getHandoverReport({
+      tenantId, projectId: project.id, changePackageId: req.params.id,
+    }));
+    const body = out.markdown;
+    res.writeHead(200, {
+      'content-type': 'text/markdown; charset=utf-8',
+      'content-length': Buffer.byteLength(body),
+    });
+    res.end(body);
   });
 }

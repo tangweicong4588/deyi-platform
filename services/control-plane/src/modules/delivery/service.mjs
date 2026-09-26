@@ -197,10 +197,20 @@ export async function getChangePackage(tenantId, projectId, id) {
   return c;
 }
 
-export async function transitionChangePackage(tenantId, projectId, id, to, headCommit) {
+export async function transitionChangePackage(tenantId, projectId, id, to, headCommit, opts = {}) {
   const c = await getChangePackage(tenantId, projectId, id);
   if (!store.CHG_STATUSES.has(to)) throw Errors.badRequest(`status 非法: ${to}`);
   checkTransition(CHG_TRANSITIONS, c.status, to, '变更包');
+  // 门禁防绕过：已纳入流水线编排的变更包，其 ready_for_review/handed_over 只能经
+  // advanceStage 门禁产生，不允许经 PATCH 直接改写（复用 V1.0-B 的 GATE_BYPASS_DENIED
+  // 模式；无编排的 V1.0-A 静态变更包不受影响）。
+  if ((to === 'ready_for_review' || to === 'handed_over') && !opts.viaPipeline) {
+    const runs = await store.listPipelineRuns(tenantId, projectId, { changePackageId: id });
+    if (runs.length) {
+      throw Errors.badRequest('已编排的变更包必须经流水线门禁推进，不能直接改状态',
+        { code: 'GATE_BYPASS_DENIED' });
+    }
+  }
   const out = await store.setChangePackageStatus(tenantId, id, to, headCommit || null);
   // 变更包移交（ready_for_review）接入 P7 审计链（best-effort）
   if (to === 'ready_for_review') {
