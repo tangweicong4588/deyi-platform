@@ -41,7 +41,7 @@
 | 策略决策 | ✅ 默认策略语义 | OPA（决策引擎） | Rego 包与内置引擎语义一致，可热插拔 |
 | 模型网关治理 | ✅ 身份映射/预算/计量/熔断 | LiteLLM（统一出口） | 平台签发虚拟 key，不直接暴露 Provider key |
 | 知识入库/检索策略 | ✅ CanonicalDoc/ACL预过滤/证据血缘 | Docling / LlamaIndex / Qdrant | Qdrant 只存派生索引，可重建 |
-| 记忆治理 | ✅ 分层/TTL/可见范围/事实提升 | Mem0 + Graphiti | 记忆不能直接成为项目事实 |
+| 记忆治理 | ❌ 未实现（仅接口 stub：`src/adapters/memory/memory.mjs`） | Mem0 + Graphiti | 记忆不能直接成为项目事实；实现前勿对外宣称具备记忆能力 |
 | 本体治理 | ✅ 候选→评审→发布/冲突仲裁/版本链 | tree-sitter（抽取） | 发布/审批/版本归本体服务 |
 | 工具执行 | ✅ MCP 网关：注册/风险分级/审批令牌/幂等 | MCP SDK / LangGraph(V1.0) | 控制面只发命令，不持长期凭证 |
 | 长流程 | ✅ 状态机/补偿定义 | Temporal | 重试/补偿/人工信号 |

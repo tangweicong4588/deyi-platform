@@ -344,3 +344,33 @@ test('本体发布钩子：publishTerm 落审计事件', async () => {
   const v = await audit.verifyChain(tenantA.id);
   assert.equal(v.ok, true); // 钩子写入后链仍连续
 });
+
+// ---------- Review-R6 回归 ----------
+
+test('R6 审计检查点：append 同事务更新 head，检查点超前可检出尾部截断（L-11）', async () => {
+  const t = await store.createTenant({ name: 'EV R6 Tenant' });
+  const a = await store.createActor(t.id, { kind: 'user', name: 'EV R6 Actor' });
+  const base = { tenantId: t.id, actorId: a.id, resourceKind: 'doc', resourceId: 'd1' };
+  await audit.append({ ...base, traceId: 'tr-r6-1', action: 'r6.a' });
+  await audit.append({ ...base, traceId: 'tr-r6-2', action: 'r6.b' });
+
+  // 检查点应与链头一致
+  const cp = await db().query('SELECT head_seq, head_hash FROM audit_heads WHERE tenant_id=?', [t.id]);
+  assert.equal(cp.length, 1);
+  const head = await db().query(
+    'SELECT seq, hash FROM audit_events WHERE tenant_id=? ORDER BY seq DESC LIMIT 1', [t.id]);
+  assert.equal(Number(cp[0].head_seq), Number(head[0].seq));
+  assert.equal(cp[0].head_hash, head[0].hash);
+  assert.equal((await audit.verifyChain(t.id)).ok, true);
+
+  // 模拟尾部丢失：检查点超前（正常 append 不可能出现）
+  await db().query('UPDATE audit_heads SET head_seq=? WHERE tenant_id=?', [Number(head[0].seq) + 5, t.id]);
+  const v = await audit.verifyChain(t.id);
+  assert.equal(v.ok, false);
+  assert.match(v.brokenAt.reason, /尾部截断/);
+
+  // 恢复检查点后验链通过
+  await db().query('UPDATE audit_heads SET head_seq=?, head_hash=? WHERE tenant_id=?',
+    [Number(head[0].seq), head[0].hash, t.id]);
+  assert.equal((await audit.verifyChain(t.id)).ok, true);
+});

@@ -40,6 +40,11 @@ export function assertRunShape(run) {
   if (!run || typeof run !== 'object') throw Errors.internal('PipelineAdapter 返回了非法 Run');
   if (!CI_RUN_KINDS.has(run.kind)) throw Errors.internal(`Run.kind 非法: ${run.kind}`);
   if (!CI_RUN_STATUSES.has(run.status)) throw Errors.internal(`Run.status 非法: ${run.status}`);
+  // M-15 数据 review：simulated 必须是布尔值——字符串 'false' 为真值，
+  // 一旦拼错会让 fake 结果通过"非模拟"门禁
+  if (typeof run.simulated !== 'boolean') {
+    throw Errors.internal(`Run.simulated 必须为布尔值（实际 ${typeof run.simulated}），防 fake 结果冒充真实`);
+  }
   return run;
 }
 

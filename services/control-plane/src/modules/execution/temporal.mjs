@@ -6,6 +6,9 @@
  * - 租户隔离：namespace = deyi-<tenantId>（清洗非法字符），workflowId = execution 平台 ID（exe_）。
  * - /readyz 上报：probeTemporal() 在启动时探测；temporalLive() 仅供状态展示，
  *   执行路径不依赖缓存状态（提交失败即降级，防"探活时正常、执行时挂了"的竞态）。
+ *
+ * 联调状态（M-12 review 如实声明）：Temporal live 路径尚未与真实 Temporal 联调，
+ * HTTP API 契约基于 Temporal 文档推断；生产上线前必须端到端验证。
  */
 import { config } from '../../kernel/config.mjs';
 import { logger } from '../../kernel/logging.mjs';

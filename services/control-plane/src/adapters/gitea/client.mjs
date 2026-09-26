@@ -104,7 +104,7 @@ class GiteaLiveClient {
   async listBranches(limit = 50) {
     const bs = await gfetch(this.baseUrl, this.token, this._p(`/branches?limit=${Math.min(limit, 50)}`));
     return (Array.isArray(bs) ? bs : []).map((b) => ({
-      name: b.name, sha: b?.commit?.id || '',
+      name: b.name, sha: b?.commit?.id || '', simulated: false,
     })).filter((b) => b.name);
   }
   async listCommits(branch, limit = 20) {
@@ -173,6 +173,7 @@ class GiteaLiveClient {
     return (Array.isArray(is) ? is : []).map((x) => ({
       number: x.number, title: x.title || '', state: x.state || '',
       url: x.html_url || '', labels: (x.labels || []).map((l) => l.name).filter(Boolean),
+      simulated: false,
     }));
   }
   async listPulls({ state = 'open', limit = 20 } = {}) {
@@ -180,7 +181,7 @@ class GiteaLiveClient {
       this._p(`/pulls?state=${encodeURIComponent(state)}&limit=${Math.min(limit, 20)}`));
     return (Array.isArray(ps) ? ps : []).map((x) => ({
       number: x.index ?? x.number, title: x.title || '', draft: !!x.draft,
-      head: x.head?.ref || '', base: x.base?.ref || '', url: x.html_url || '',
+      head: x.head?.ref || '', base: x.base?.ref || '', url: x.html_url || '', simulated: false,
     }));
   }
 }
@@ -287,10 +288,10 @@ class FakeRepoClient {
         ['for-each-ref', '--format=%(objectname)%09%(refname:short)', 'refs/heads']);
       return out.split('\n').filter(Boolean).map((l) => {
         const [sha, name] = l.split('\t');
-        return { name, sha };
+        return { name, sha, simulated: true };
       }).filter((b) => b.name && b.sha);
     }
-    return [...this.st.branches.entries()].map(([name, sha]) => ({ name, sha }));
+    return [...this.st.branches.entries()].map(([name, sha]) => ({ name, sha, simulated: true }));
   }
   async listCommits(branch, limit = 20) {
     sanitizeBranchName(branch);
@@ -299,11 +300,11 @@ class FakeRepoClient {
       const out = git(dir, ['log', `--format=%H%x01%s%x01%an%x01%aI`, '-n', String(Math.min(limit, 20)), branch]);
       return out.split('\n').filter(Boolean).map((l) => {
         const [sha, message, author, date] = l.split('\x01');
-        return { sha, message: (message || '').slice(0, 200), author: author || '', date: date || '' };
+        return { sha, message: (message || '').slice(0, 200), author: author || '', date: date || '', simulated: true };
       });
     }
     const { sha } = await this.getBranchCommit(branch);
-    return [{ sha, message: `fake commit on ${branch}`, author: 'fake', date: new Date().toISOString() }];
+    return [{ sha, message: `fake commit on ${branch}`, author: 'fake', date: new Date().toISOString(), simulated: true }];
   }
   async createBranch({ branch, from }) {
     sanitizeBranchName(branch);
@@ -352,7 +353,7 @@ class FakeRepoClient {
   }
   async listPulls() {
     return [...this.st.pulls.values()].filter((p) => p.state === 'open')
-      .map((p) => ({ number: p.number, title: p.title, draft: p.draft, head: p.head, base: p.base, url: p.url }));
+      .map((p) => ({ number: p.number, title: p.title, draft: p.draft, head: p.head, base: p.base, url: p.url, simulated: true }));
   }
   async listIssues() { return []; }
 }

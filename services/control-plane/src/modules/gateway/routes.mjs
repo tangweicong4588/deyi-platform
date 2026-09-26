@@ -9,7 +9,7 @@
 import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx, requireTenant } from '../../kernel/context.mjs';
-import { nowMs } from '../../kernel/ids.mjs';
+import { nowMs, newId } from '../../kernel/ids.mjs';
 import { authenticate, tenantScope, requireTenantRole, requireOperator } from '../identity/middleware.mjs';
 import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
@@ -43,32 +43,94 @@ async function budgetState(tenantId, project) {
   return { tenantBudget, projectBudget, remaining };
 }
 
+/**
+ * M-16 数据 review：计量 fail-safe。上游模型调用已成功（token 已在 provider 侧消费），
+ * 本地记账失败是平台内部问题——绝不能把一次成功的调用改写成客户端 500。
+ * 记账失败时写入 outbox 等待补记（reconcileUsageOutbox），调用方照常拿到 200。
+ */
 async function persistUsage({ tenantId, project, actorId, traceId, model, endpoint, usage, latencyMs, status, cached }) {
   const promptTokens = usage?.prompt_tokens || 0;
   const completionTokens = usage?.completion_tokens || 0;
   const totalTokens = usage?.total_tokens || (promptTokens + completionTokens);
   const costCents = calcCostCents(model, promptTokens, completionTokens);
-  await gstore.recordCall({
+  const callRow = {
+    // id 在此预生成：补记重试时复用同一 id（recordCall 的 spread 会保留它），防重复记账
+    id: newId('call'), created_at: nowMs(),
     tenant_id: tenantId, project_id: project?.id || null, actor_id: actorId, trace_id: traceId,
     model: model.name, litellm_model: model.litellm_model, endpoint,
     prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens,
     cost_cents: costCents, latency_ms: latencyMs, status, cached: cached ? 1 : 0,
-  });
-  const pk = gstore.currentPeriodKey();
-  const tb = await gstore.getBudget(tenantId, null, pk);
-  if (tb) await gstore.addUsage(tb.id, totalTokens, costCents);
-  if (project) {
-    const pb = await gstore.getBudget(tenantId, project.id, pk);
-    if (pb) await gstore.addUsage(pb.id, totalTokens, costCents);
+  };
+  try {
+    await gstore.recordCall(callRow);
+    const pk = gstore.currentPeriodKey();
+    const tb = await gstore.getBudget(tenantId, null, pk);
+    if (tb) await gstore.addUsage(tb.id, totalTokens, costCents);
+    if (project) {
+      const pb = await gstore.getBudget(tenantId, project.id, pk);
+      if (pb) await gstore.addUsage(pb.id, totalTokens, costCents);
+    }
+    return { totalTokens, costCents, meteringDeferred: false };
+  } catch (e) {
+    logger.error('gateway metering failed — queued to outbox (upstream success preserved)', {
+      traceId, model: model.name, err: e.message,
+    });
+    try {
+      await gstore.enqueueUsageOutbox(tenantId, { callRow }, e.message);
+    } catch (e2) {
+      // 连 outbox 都写不进：只剩结构化日志兜底，仍不转 500
+      logger.error('gateway metering outbox write failed — manual reconcile from logs required', {
+        traceId, callRow, err: e2.message,
+      });
+    }
+    return { totalTokens, costCents, meteringDeferred: true };
   }
-  return { totalTokens, costCents };
+}
+
+/**
+ * 补记 outbox：把记账失败暂存的调用逐条回写。
+ * 幂等：callRow.id 在 persistUsage 时预生成；崩溃重试时先查后写——已落库的调用
+ * 跳过记账与预算累加，直接标记 processed，不重复记账。
+ * 由 operator 手动触发（POST /v1/admin/metering/reconcile）或定时任务调用。
+ */
+export async function reconcileUsageOutbox({ limit = 100 } = {}) {
+  const pending = await gstore.listPendingUsageOutbox(limit);
+  let ok = 0, fail = 0;
+  for (const row of pending) {
+    try {
+      const { callRow } = JSON.parse(row.payload_json || '{}');
+      if (!callRow || !callRow.tenant_id) throw new Error('outbox payload 缺 callRow');
+      if (!(await gstore.getCallById(callRow.id))) {
+        await gstore.recordCall(callRow);
+        const pk = gstore.currentPeriodKey();
+        const tb = await gstore.getBudget(callRow.tenant_id, null, pk);
+        if (tb) await gstore.addUsage(tb.id, callRow.total_tokens || 0, callRow.cost_cents || 0);
+        if (callRow.project_id) {
+          const pb = await gstore.getBudget(callRow.tenant_id, callRow.project_id, pk);
+          if (pb) await gstore.addUsage(pb.id, callRow.total_tokens || 0, callRow.cost_cents || 0);
+        }
+      }
+      await gstore.markUsageOutboxProcessed(row.id);
+      ok++;
+    } catch (e) {
+      await gstore.bumpUsageOutboxAttempt(row.id, e.message).catch(() => {});
+      fail++;
+    }
+  }
+  return { pending: pending.length, ok, fail };
 }
 
 /** SSE 直通：边转发边从 data 块里抓 usage（已注入 stream_options.include_usage） */
-async function pipeStream(upRes, res, meta) {
-  res.writeHead(200, {
+async function pipeStream(upRes, res, meta, disclosure) {
+  const headers = {
     'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive',
-  });
+  };
+  if (disclosure) {
+    headers['x-deyi-served-model'] = disclosure.served_model;
+    headers['x-deyi-engine'] = disclosure.engine;
+    headers['x-deyi-fallback'] = disclosure.fallback ? 'true' : 'false';
+  }
+  res.writeHead(200, headers);
   const t0 = nowMs();
   let usage = null;
   try {
@@ -144,6 +206,26 @@ async function guardAndRoute(reqLike, endpoint, projectOverride = undefined) {
 }
 
 /**
+ * L-10 安全 review：fallback 可见性。降级链对调用方不可见时，
+ * "请求 gpt-4 实际走了 deepseek" 会成为隐性计费/合规风险。
+ * 响应头（流式/非流式通用）+ 非流式 JSON 的 deyi 扩展字段披露实际服务模型与引擎。
+ */
+function fallbackDisclosure(model, usedModel, engineTag) {
+  const fellBack = usedModel !== model.litellm_model;
+  return {
+    requested_model: model.name,
+    served_model: usedModel,
+    engine: engineTag,
+    fallback: fellBack,
+  };
+}
+function setDisclosureHeaders(res, d) {
+  res.setHeader('x-deyi-served-model', d.served_model);
+  res.setHeader('x-deyi-engine', d.engine);
+  res.setHeader('x-deyi-fallback', d.fallback ? 'true' : 'false');
+}
+
+/**
  * 带降级链的上游调用：主模型失败（网络错误 / 429 / 5xx）后按序试 fallback。
  * 非重试类失败（4xx 等）直接抛，不降级。最终成功返回 { json, usedModel }。
  */
@@ -197,16 +279,20 @@ async function handleChat(req, res) {
       await persistUsage({ ...meta, usage: {}, latencyMs: nowMs() - t0, status: 'error' }).catch(() => {});
       throw e;
     });
+  const disclosure = fallbackDisclosure(model, usedModel, engineTag);
   if (stream) {
-    await pipeStream(stream, res, meta);
+    await pipeStream(stream, res, meta, disclosure);
     return;
   }
-  const { totalTokens, costCents } = await persistUsage({
+  const { totalTokens, costCents, meteringDeferred } = await persistUsage({
     ...meta, usage: json.usage || {}, latencyMs: nowMs() - t0, status: 'ok', cached: json._deyi_cached,
   });
+  if (meteringDeferred) res.setHeader('x-deyi-metering-deferred', 'true');
   logger.info('gateway chat', {
     model: model.name, via: usedModel, engine: engineTag, tokens: totalTokens, cost_cents: costCents,
   });
+  setDisclosureHeaders(res, disclosure);
+  if (json && typeof json === 'object' && !Array.isArray(json)) json.deyi = disclosure;
   sendJson(res, 200, json);
 }
 
@@ -230,12 +316,16 @@ async function handleEmbeddings(req, res) {
       await persistUsage({ ...meta, usage: {}, latencyMs: nowMs() - t0, status: 'error' }).catch(() => {});
       throw e;
     });
-  const { totalTokens, costCents } = await persistUsage({
+  const { totalTokens, costCents, meteringDeferred } = await persistUsage({
     ...meta, usage: json.usage || {}, latencyMs: nowMs() - t0, status: 'ok',
   });
+  if (meteringDeferred) res.setHeader('x-deyi-metering-deferred', 'true');
   logger.info('gateway embeddings', {
     model: model.name, via: usedModel, engine: engineTag, tokens: totalTokens, cost_cents: costCents,
   });
+  const disclosure = fallbackDisclosure(model, usedModel, engineTag);
+  setDisclosureHeaders(res, disclosure);
+  if (json && typeof json === 'object' && !Array.isArray(json)) json.deyi = disclosure;
   sendJson(res, 200, json);
 }
 
@@ -361,4 +451,15 @@ export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions'
   // 用量账本（租户 admin；不含 prompt 原文）
   app.get('/v1/admin/tenants/:tenantId/usage', authenticate, tenantScope, requireTenantRole('admin'),
     async (req, res) => sendJson(res, 200, { data: await gstore.listCalls(req.params.tenantId, req.query.limit) }));
+
+  // 计量 outbox：记账失败暂存的补记（M-16）。operator 手动触发；也可在定时任务中调用 reconcileUsageOutbox
+  app.get('/v1/admin/metering/outbox', authenticate, requireOperator,
+    async (req, res) => sendJson(res, 200, {
+      data: {
+        pending: await gstore.countPendingUsageOutbox(),
+        items: await gstore.listPendingUsageOutbox(req.query.limit),
+      },
+    }));
+  app.post('/v1/admin/metering/reconcile', authenticate, requireOperator,
+    async (req, res) => sendJson(res, 200, { data: await reconcileUsageOutbox({ limit: req.body?.limit }) }));
 }

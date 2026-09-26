@@ -6,6 +6,9 @@
  * - 否则 ALLOW_DIRECT_PROVIDER=true 且 DIRECT_PROVIDER_BASE_URL 设置 → 直连，
  *   明确标记为 fallback（能力降级：无统一重试/降级/虚拟 key）。
  * - 重试只针对网络错误 / 429 / 5xx，且有总次数与退避上限。
+ *
+ * 联调状态（M-12 review 如实声明）：LiteLLM/直连 provider 的 live 路径尚未与真实
+ * 服务联调，请求契约基于 OpenAI 兼容 API 文档推断；生产上线前必须端到端验证。
  */
 import { config } from '../../kernel/config.mjs';
 import { Errors } from '../../kernel/errors.mjs';

@@ -89,6 +89,15 @@ export async function append({ tenantId, projectId = null, actorId, traceId, act
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, tenantId, projectId, actorId, traceId, action, resourceKind, resourceId,
        canonicalJson(payload), prevHash, hash, seq, createdAt]);
+    // L-11：同事务更新链头检查点（尾部截断检测的基准）。幂等去重命中时直接返回，
+    // 检查点不动——去重本就没有产生新事件。
+    // EXCLUDED/excluded 大小写在 PG/SQLite 均可（标识符不区分大小写），单语句双库通用。
+    await tx.query(
+      `INSERT INTO audit_heads(tenant_id, head_seq, head_hash, updated_at)
+       VALUES (?,?,?,?)
+       ON CONFLICT(tenant_id) DO UPDATE SET head_seq=EXCLUDED.head_seq,
+         head_hash=EXCLUDED.head_hash, updated_at=EXCLUDED.updated_at`,
+      [tenantId, seq, hash, createdAt]);
     return id;
   }));
 }
@@ -135,6 +144,30 @@ export async function verifyChain(tenantId, { from = 1, to = null } = {}) {
     expectedPrev = r.hash;
   }
   const head = rows.length ? { id: rows[rows.length - 1].id, seq: rows[rows.length - 1].seq, hash: expectedPrev } : null;
+  // L-11：尾部截断检测。哈希链自洽但尾部整段被删时，链内无从发现——用检查点比对。
+  // 只在全链验（from=1 且 to=null）时做；区间验跳过（区间本就不含链头）。
+  // 双向比对：检查点超前=尾部事件丢失；检查点滞后=有人绕过 append 直写事件。
+  if (from === 1 && to == null) {
+    const cp = await db().query(
+      'SELECT head_seq, head_hash FROM audit_heads WHERE tenant_id=?', [tenantId]);
+    if (cp[0]) {
+      const maxSeq = head ? Number(head.seq) : 0;
+      const cpSeq = Number(cp[0].head_seq);
+      if (cpSeq !== maxSeq || (head && cp[0].head_hash !== head.hash)) {
+        const reason = cpSeq > maxSeq
+          ? `尾部截断：检查点 head_seq=${cpSeq}，但链上最大 seq=${maxSeq}（事件丢失或被删）`
+          : `检查点滞后：检查点 head_seq=${cpSeq}，但链上最大 seq=${maxSeq}（可能有人绕过 append 直写）`;
+        return {
+          ok: false, checked: rows.length, head: null,
+          brokenAt: {
+            seq: null, id: null, reason,
+            expected: { seq: cpSeq, hash: cp[0].head_hash },
+            actual: head,
+          },
+        };
+      }
+    }
+  }
   return { ok: true, checked: rows.length, head };
 }
 

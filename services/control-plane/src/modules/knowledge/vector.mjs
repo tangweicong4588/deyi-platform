@@ -7,6 +7,10 @@
  *   payload 里同时存平台 ID；业务真相永远在 DB，绝不把 point ID 当业务 ID。
  * - filter 语义两边一致：{ tenant_id, document_ids?: string[] }（ACL 预过滤在 DB 侧
  *   算出可见 document_id 列表后传入）。
+ *
+ * 联调状态（M-12 review 如实声明）：Qdrant live 路径尚未与真实 Qdrant 联调，
+ * REST 契约基于 Qdrant API 文档推断；生产上线前必须端到端验证。
+ * 重建见 scripts/rebuild-qdrant.mjs（向量索引是可重建派生数据）。
  */
 import { createHash } from 'node:crypto';
 import { config } from '../../kernel/config.mjs';

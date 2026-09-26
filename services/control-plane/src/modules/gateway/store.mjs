@@ -143,3 +143,44 @@ export async function listCalls(tenantId, limit = 100) {
             completion_tokens,total_tokens,cost_cents,latency_ms,status,created_at
      FROM model_calls WHERE tenant_id=? ORDER BY created_at DESC LIMIT ${n}`, [tenantId]);
 }
+
+// ---------- 计量 outbox（M-16）：记账失败时暂存，等待补记 ----------
+export async function enqueueUsageOutbox(tenantId, payload, lastError) {
+  const row = {
+    id: newId('uob'), tenant_id: tenantId, payload_json: JSON.stringify(payload),
+    attempts: 0, last_error: String(lastError || '').slice(0, 2000),
+    created_at: nowMs(), processed_at: null,
+  };
+  await db().query(
+    `INSERT INTO gateway_usage_outbox(id,tenant_id,payload_json,attempts,last_error,created_at,processed_at)
+     VALUES (?,?,?,?,?,?,?)`,
+    [row.id, row.tenant_id, row.payload_json, row.attempts, row.last_error, row.created_at, row.processed_at]);
+  return row;
+}
+
+export async function listPendingUsageOutbox(limit = 100) {
+  const n = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  return db().query(
+    `SELECT * FROM gateway_usage_outbox WHERE processed_at IS NULL ORDER BY created_at LIMIT ${n}`);
+}
+
+export async function markUsageOutboxProcessed(id) {
+  await db().query(`UPDATE gateway_usage_outbox SET processed_at=? WHERE id=?`, [nowMs(), id]);
+}
+
+export async function bumpUsageOutboxAttempt(id, err) {
+  await db().query(
+    `UPDATE gateway_usage_outbox SET attempts=attempts+1, last_error=? WHERE id=?`,
+    [String(err || '').slice(0, 2000), id]);
+}
+
+export async function countPendingUsageOutbox() {
+  const rows = await db().query(
+    `SELECT COUNT(*) AS c FROM gateway_usage_outbox WHERE processed_at IS NULL`);
+  return rows[0]?.c || 0;
+}
+
+export async function getCallById(id) {
+  const rows = await db().query(`SELECT id FROM model_calls WHERE id=?`, [id]);
+  return rows[0] || null;
+}

@@ -229,3 +229,58 @@ test('未认证调用网关 → 401', async () => {
   });
   assert.equal(r.status, 401);
 });
+
+// ---------- Review-R6 回归 ----------
+
+test('R6 fallback 披露：响应头 + deyi 扩展字段（L-10）', async () => {
+  seen.length = 0;
+  const r = await post('/v1/gw/chat/completions', {
+    model: 'with-fallback', messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-deyi-fallback'), 'true');
+  assert.equal(r.headers.get('x-deyi-served-model'), 'deyi-default');
+  const json = await r.json();
+  assert.equal(json.deyi.fallback, true);
+  assert.equal(json.deyi.served_model, 'deyi-default');
+  assert.equal(json.deyi.requested_model, 'with-fallback');
+});
+
+test('R6 未降级：fallback=false 如实披露（L-10）', async () => {
+  const r = await post('/v1/gw/chat/completions', {
+    model: 'deyi-default', messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-deyi-fallback'), 'false');
+  assert.equal(r.headers.get('x-deyi-served-model'), 'deyi-default');
+  const json = await r.json();
+  assert.equal(json.deyi.fallback, false);
+  assert.equal(json.deyi.requested_model, 'deyi-default');
+});
+
+test('R6 计量失败不改写上游成功：仍 200 + 进 outbox + 可补记（M-16）', async () => {
+  const { reconcileUsageOutbox } = await import('../src/modules/gateway/routes.mjs');
+  await db().exec('DROP TABLE model_calls'); // 模拟记账失败
+  try {
+    const r = await post('/v1/gw/chat/completions', {
+      model: 'deyi-default', messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(r.status, 200, '上游成功时记账失败不能转 500');
+    assert.equal(r.headers.get('x-deyi-metering-deferred'), 'true');
+    assert.ok((await gstore.countPendingUsageOutbox()) >= 1, '记账载荷应进 outbox');
+  } finally {
+    // migrate 会跳过已应用的 002（表被删了但 _migrations 有记录），这里按 DDL 直接重建
+    await db().exec(`CREATE TABLE IF NOT EXISTS model_calls (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+      project_id TEXT REFERENCES projects(id), actor_id TEXT NOT NULL REFERENCES actors(id),
+      trace_id TEXT NOT NULL, model TEXT NOT NULL, litellm_model TEXT, endpoint TEXT NOT NULL,
+      prompt_tokens INTEGER NOT NULL DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0, cost_cents INTEGER NOT NULL DEFAULT 0,
+      latency_ms INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+      cached INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`);
+  }
+  const res = await reconcileUsageOutbox({ limit: 100 });
+  assert.ok(res.ok >= 1, '补记应成功');
+  assert.equal(res.fail, 0);
+  assert.equal(await gstore.countPendingUsageOutbox(), 0);
+});
