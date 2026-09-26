@@ -34,7 +34,7 @@ function assertTenantActor(actorId, what) {
 
 /** 递归疑似密钥键扫描（environment/dependencies JSON 绝不能带明文凭据） */
 const SECRET_KEY_RE = /(password|passwd|secret|token|api[_-]?key|credential|private[_-]?key|access[_-]?key)/i;
-function scanSecretKeys(obj, path = '$') {
+export function scanSecretKeys(obj, path = '$') {
   if (!obj || typeof obj !== 'object') return;
   for (const k of Object.keys(obj)) {
     const norm = String(k).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[_-]/g, '');

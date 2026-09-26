@@ -21,6 +21,8 @@ import { tracingMiddleware, isTracingEnabled } from './kernel/tracing.mjs';
 import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
 import { probeDocParse, getDocParseStatus } from './modules/knowledge/docling.mjs';
 import { probeTemporal, getWorkflowStatus } from './modules/execution/temporal.mjs';
+import { getRepoAdapterStatus } from './adapters/gitea/client.mjs';
+import { getPipelineAdapterStatus } from './adapters/pipeline/adapter.mjs';
 import { isOpaEnabled } from './modules/policy/opa.mjs';
 import { getIdP } from './modules/identity/idp.mjs';
 
@@ -39,6 +41,8 @@ function adapterStatus() {
     vector: getVectorStatus(),
     doc_parse: getDocParseStatus(),
     workflow: getWorkflowStatus(),
+    repo: getRepoAdapterStatus(),
+    ci: getPipelineAdapterStatus(),
     audit_anchor: config.AUDIT_ANCHOR_URL ? 'configured' : 'none(本地哈希链)',
     tracing: isTracingEnabled() ? 'otlp(live)' : 'noop',
   };

@@ -16,6 +16,7 @@ import { db } from '../../db/index.mjs';
 import { logger } from '../../kernel/logging.mjs';
 import * as svc from './service.mjs';
 import * as pipe from './pipeline.mjs';
+import * as repo from './repo.mjs';
 
 async function scopedProject(req, minRank, opName) {
   const c = ctx();
@@ -345,6 +346,66 @@ export function registerDeliveryRoutes(app) {
     const out = await withTenant(tenantId, () => pipe.decideGateException({
       tenantId, projectId: project.id, actorId: actor.id, roles,
       gexId: req.params.gexId, approved: !!approved, reason,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  // ---- V1.0-C 仓库与 CI 适配 ----
+  // RepoSnapshot 自动采集（挂到 facts 阶段运行，满足事实门禁的基线 commit 项）
+  app.post(R('/delivery/repo-snapshots/collect'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'repo.snapshot.collect');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'repo_snapshot' } });
+    const { repoBindingId = null, pipelineRunId } = req.body || {};
+    const out = await withTenant(tenantId, () => repo.collectRepoSnapshot({
+      tenantId, projectId: project.id, actorId: actor.id, repoBindingId, pipelineRunId,
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  // 受控分支：为变更包创建 dy/<chg_id>（分支一经创建不可覆盖）
+  app.post(R('/delivery/change-packages/:id/branch'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'repo.branch.create');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'change_package' } });
+    const { repoBindingId = null, baseBranch = null } = req.body || {};
+    const out = await withTenant(tenantId, () => repo.createControlledBranch({
+      tenantId, projectId: project.id, actorId: actor.id,
+      changePackageId: req.params.id, repoBindingId, baseBranch,
+    }));
+    sendJson(res, out.existed ? 200 : 201, { data: out });
+  });
+
+  // 草稿 PR：平台只创建 draft（硬禁令：无 merge 端点，merged 只能由外部同步）
+  app.post(R('/delivery/change-packages/:id/pull-request'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'repo.pr.create');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pull_request' } });
+    const { repoBindingId = null, title = null, description = '' } = req.body || {};
+    const out = await withTenant(tenantId, () => repo.createDraftPullRequest({
+      tenantId, projectId: project.id, actorId: actor.id,
+      changePackageId: req.params.id, repoBindingId, title, description,
+    }));
+    sendJson(res, out.existed ? 200 : 201, { data: out });
+  });
+
+  app.get(R('/delivery/pull-requests'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'repo.pr.list');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'pull_request' } });
+    sendJson(res, 200, {
+      data: await repo.listPullRequests(tenantId, project.id, { changePackageId: req.query.changePackageId || null }),
+    });
+  });
+
+  app.get(R('/delivery/pull-requests/:id'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'repo.pr.get');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'pull_request' } });
+    sendJson(res, 200, { data: await repo.getPullRequest(tenantId, project.id, req.params.id) });
+  });
+
+  // PR 状态同步：从远端轮询（merged/closed 只能经此进入）
+  app.post(R('/delivery/pull-requests/:id/sync'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'repo.pr.sync');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pull_request' } });
+    const out = await withTenant(tenantId, () => repo.syncPullRequest({
+      tenantId, projectId: project.id, actorId: actor.id, prId: req.params.id,
     }));
     sendJson(res, 200, { data: out });
   });

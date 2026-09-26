@@ -205,6 +205,16 @@ export async function setChangePackageStatus(tenantId, id, status, headCommit = 
   return getChangePackage(tenantId, id);
 }
 
+/** 受控分支落库（V1.0-C）：branch 只能写一次（dy/<chg_id>），不许覆盖已有分支 */
+export async function setChangePackageBranch(tenantId, id, branch, baseCommit) {
+  const upd = await db().run(
+    `UPDATE change_packages SET branch=?, base_commit=?, updated_at=?
+     WHERE id=? AND tenant_id=? AND (branch IS NULL OR branch='')`,
+    [branch, baseCommit, nowMs(), id, tenantId]);
+  if (upd.changes === 0) throw Errors.conflict('变更包已有分支，不允许覆盖（分支一经创建不可改）');
+  return getChangePackage(tenantId, id);
+}
+
 // ---------- artifacts ----------
 export async function createArtifact({ tenantId, changePackageId, kind, contentHash, uri = '', signature = null }) {
   const row = {
@@ -269,6 +279,7 @@ export async function setPipelineRun(tenantId, id, { status, gateDecision, start
 // ---------- fact_snapshots（snp_）：事实阶段手动登记的基线 ----------
 const normSnp = (r) => r && {
   ...r,
+  kind: r.kind || 'manual',
   environment: parseJson(r.environment, {}),
   dependencies: parseJson(r.dependencies, {}),
   unknown_items: parseJson(r.unknown_items, []),
@@ -276,24 +287,25 @@ const normSnp = (r) => r && {
 
 /** 登记即覆盖：每个 facts 阶段运行只认一条快照 */
 export async function upsertFactSnapshot({ tenantId, projectId, pipelineRunId, baselineCommit,
-  environment = {}, dependencies = {}, unknownItems = [], recordedBy }) {
+  environment = {}, dependencies = {}, unknownItems = [], recordedBy, kind = 'manual' }) {
+  if (!['manual', 'snapshot'].includes(kind)) throw Errors.badRequest(`事实快照 kind 非法: ${kind}`);
   const now = nowMs();
   const row = await getFactSnapshot(tenantId, pipelineRunId).catch(() => null);
   if (row) {
     await db().query(
       `UPDATE fact_snapshots SET baseline_commit=?, environment=?, dependencies=?, unknown_items=?,
-        recorded_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
+        kind=?, recorded_by=?, updated_at=? WHERE id=? AND tenant_id=?`,
       [baselineCommit, JSON.stringify(environment), JSON.stringify(dependencies),
-        JSON.stringify(unknownItems), recordedBy, now, row.id, tenantId]);
+        JSON.stringify(unknownItems), kind, recordedBy, now, row.id, tenantId]);
     return getFactSnapshot(tenantId, pipelineRunId);
   }
   const id = newId('snp');
   await db().query(
     `INSERT INTO fact_snapshots(id,tenant_id,project_id,pipeline_run_id,baseline_commit,environment,
-      dependencies,unknown_items,recorded_by,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      dependencies,unknown_items,kind,recorded_by,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     [id, tenantId, projectId, pipelineRunId, baselineCommit, JSON.stringify(environment),
-      JSON.stringify(dependencies), JSON.stringify(unknownItems), recordedBy, now, now]);
+      JSON.stringify(dependencies), JSON.stringify(unknownItems), kind, recordedBy, now, now]);
   return getFactSnapshot(tenantId, pipelineRunId);
 }
 
@@ -303,6 +315,77 @@ export async function getFactSnapshot(tenantId, pipelineRunId) {
   return normSnp(rows[0]) || null;
 }
 
+// ---------- pull_requests（pr_）：草稿 PR 登记簿（平台只创建 draft） ----------
+const normPr = (r) => r && { ...r, simulated: r.simulated === 1 };
+
+export const PR_STATUSES = new Set(['draft', 'open', 'merged', 'closed']);
+// 外部事件可跳过 open（人工在远端直接合入/关闭 draft PR 是真实场景）；
+// 平台自身永不执行合入（无 merge 端点），merged/closed 只能经 sync 进入。
+const PR_TRANSITIONS = {
+  draft: ['open', 'closed', 'merged'],
+  open: ['merged', 'closed'],
+  merged: [],
+  closed: [],
+};
+
+export async function createPullRequest({ tenantId, projectId, changePackageId, repoBindingId,
+  provider, repo = '', number = null, url = '', title = '', status = 'draft',
+  headBranch = '', baseBranch = '', headCommit = '', simulated = false, createdBy }) {
+  if (!PR_STATUSES.has(status)) throw Errors.badRequest(`PR status 非法: ${status}`);
+  // 平台创建的 PR 只能是 draft（硬禁令：自批自合禁止）
+  if (status !== 'draft') throw Errors.badRequest('平台只允许登记草稿 PR', { code: 'DRAFT_REQUIRED' });
+  const id = newId('pr');
+  const now = nowMs();
+  await db().query(
+    `INSERT INTO pull_requests(id,tenant_id,project_id,change_package_id,repo_binding_id,provider,
+      repo,number,url,title,status,head_branch,base_branch,head_commit,simulated,created_by,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, tenantId, projectId, changePackageId, repoBindingId, provider, repo, number, url, title,
+      status, headBranch, baseBranch, headCommit, simulated ? 1 : 0, createdBy || null, now, now]);
+  return getPullRequest(tenantId, id);
+}
+
+export async function getPullRequest(tenantId, id) {
+  assertId('pr', id);
+  const rows = await db().query('SELECT * FROM pull_requests WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normPr(rows[0]) || null;
+}
+
+/** 变更包的现存 PR（draft/open 视为有效，用于创建幂等） */
+export async function getActivePullRequest(tenantId, changePackageId) {
+  const rows = await db().query(
+    `SELECT * FROM pull_requests WHERE tenant_id=? AND change_package_id=?
+     AND status IN ('draft','open') ORDER BY created_at DESC`,
+    [tenantId, changePackageId]);
+  return normPr(rows[0]) || null;
+}
+
+export async function listPullRequests(tenantId, projectId, { changePackageId } = {}) {
+  let sql = 'SELECT * FROM pull_requests WHERE tenant_id=? AND project_id=?';
+  const args = [tenantId, projectId];
+  if (changePackageId) { sql += ' AND change_package_id=?'; args.push(changePackageId); }
+  sql += ' ORDER BY created_at DESC';
+  return (await db().query(sql, args)).map(normPr);
+}
+
+/**
+ * PR 状态推进（只允许外部同步：draft→open/closed，open→merged/closed）。
+ * 平台不提供 merge 端点，merged/closed 只能经 syncPullRequest 从远端同步进来。
+ */
+export async function setPullRequestStatus(tenantId, id, to, { url = null, headCommit = null } = {}) {
+  if (!PR_STATUSES.has(to)) throw Errors.badRequest(`PR status 非法: ${to}`);
+  const cur = await getPullRequest(tenantId, id);
+  if (!cur) throw Errors.notFound('PR 登记不存在');
+  if (cur.status === to) return cur;
+  if (!(PR_TRANSITIONS[cur.status] || []).includes(to)) {
+    throw Errors.badRequest(`PR 非法状态跃迁: ${cur.status} → ${to}`, { code: 'INVALID_TRANSITION' });
+  }
+  await db().query(
+    `UPDATE pull_requests SET status=?, url=COALESCE(?, url), head_commit=COALESCE(?, head_commit),
+      updated_at=? WHERE id=? AND tenant_id=?`,
+    [to, url, headCommit, nowMs(), id, tenantId]);
+  return getPullRequest(tenantId, id);
+}
 // ---------- clarifications（clf_）：澄清问题与回答 ----------
 const normClf = (r) => r && { ...r, impacts_implementation: r.impacts_implementation === 1 };
 

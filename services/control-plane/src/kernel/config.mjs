@@ -30,6 +30,7 @@ const DEF = {
   QDRANT_URL: '',            // 设了就走 Qdrant，否则用内置本地向量索引（仅开发/测试）
   DOCLING_URL: '',           // 设了就走 Docling 服务，否则用内置解析器（能力降级）
   TEMPORAL_ADDRESS: '',      // 设了就走 Temporal，否则用内置工作流执行器
+  GITEA_URL: '',               // 设了 gitea provider 就走真 Gitea API，否则用 fake（内存/本地 git，仅开发/测试）
   MCP_TIMEOUT_MS: '30000',      // 单次工具调用超时
   EXEC_RESULT_TIMEOUT_MS: '60000', // Temporal 结果轮询上限
   AUDIT_ANCHOR_URL: '',      // 外部锚定端点（R13）；未设则只做本地哈希链并警告

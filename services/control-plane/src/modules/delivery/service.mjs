@@ -53,6 +53,8 @@ const checkTransition = (map, from, to, label) => {
 const HASH_RE = /^[0-9a-f]{64}$/i;
 /** repo binding 请求体里禁止出现任何疑似明文凭据字段（密钥铁律） */
 const SECRET_FIELD_RE = /(password|passwd|secret|token|api[_-]?key|credential|private[_-]?key)/i;
+/** remote_url 内嵌凭据（https://user:pass@host/...）同样禁止：凭据必须走 credential_ref */
+const URL_EMBEDDED_CRED_RE = /:\/\/[^/\s]*:[^/\s]*@/;
 export function rejectPlaintextSecrets(body) {
   if (!body || typeof body !== 'object') return;
   for (const k of Object.keys(body)) {
@@ -161,6 +163,10 @@ export async function bindRepo(tenantId, projectId, body) {
   const { provider, remoteUrl, defaultBranch = 'main', credentialRef = null } = body || {};
   if (!store.REPO_PROVIDERS.has(provider)) throw Errors.badRequest(`provider 非法: ${provider}`);
   if (!remoteUrl || !String(remoteUrl).trim()) throw Errors.badRequest('remoteUrl 必填');
+  if (URL_EMBEDDED_CRED_RE.test(String(remoteUrl))) {
+    throw Errors.badRequest('remote_url 禁止内嵌凭据（user:pass@），请用 credential_ref 引用 vault',
+      { code: 'PLAINTEXT_SECRET' });
+  }
   return store.createRepoBinding({ tenantId, projectId, provider, remoteUrl, defaultBranch, credentialRef });
 }
 
@@ -172,10 +178,14 @@ export async function getRepoBinding(tenantId, projectId, id) {
 
 // ---------- change packages ----------
 export async function createChangePackage({ tenantId, projectId, actorId, body }) {
-  const { requirementId, branch, baseCommit = '', headCommit = '', dodChecklist = {} } = body || {};
+  const { requirementId, branch = '', baseCommit = '', headCommit = '', dodChecklist = {} } = body || {};
   if (!requirementId) throw Errors.badRequest('requirementId 必填');
   await getRequirement(tenantId, projectId, requirementId); // 归属校验
-  if (!branch || !String(branch).trim()) throw Errors.badRequest('branch 必填');
+  // V1.0-C：branch 可选——不传则由平台经 POST …/branch 创建受控分支 dy/<chg_id>；
+  // 传入时仍做非空校验（兼容 V1.0-A 调用方）。
+  if (branch !== undefined && branch !== null && branch !== '' && !String(branch).trim()) {
+    throw Errors.badRequest('branch 不能为空字符串');
+  }
   return store.createChangePackage({
     tenantId, projectId, requirementId, branch, baseCommit, headCommit, dodChecklist, createdBy: actorId,
   });
