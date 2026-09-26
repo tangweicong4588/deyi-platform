@@ -17,6 +17,7 @@ import { logger } from '../../kernel/logging.mjs';
 import * as svc from './service.mjs';
 import * as pipe from './pipeline.mjs';
 import * as repo from './repo.mjs';
+import * as stp from './steps.mjs';
 
 async function scopedProject(req, minRank, opName) {
   const c = ctx();
@@ -406,6 +407,48 @@ export function registerDeliveryRoutes(app) {
     await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pull_request' } });
     const out = await withTenant(tenantId, () => repo.syncPullRequest({
       tenantId, projectId: project.id, actorId: actor.id, prId: req.params.id,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  // ---- V1.0-D 隔离 Runner ----
+  // 触发一次 step（build|test|scan|package）：隔离执行 + 结果落库
+  // 注意：body 字段逐个白名单提取，绝不 spread——防止调用方覆盖 tenantId/projectId
+  app.post(R('/delivery/change-packages/:id/steps'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'runner.step.run');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'runner_run' } });
+    const b = req.body || {};
+    const out = await withTenant(tenantId, () => stp.runStep({
+      tenantId, projectId: project.id, actorId: c.actorId,
+      changePackageId: req.params.id,
+      step: b.step, name: b.name, commands: b.commands, env: b.env, limits: b.limits,
+      artifacts: b.artifacts, reportFile: b.reportFile, sourceDir: b.sourceDir, source: b.source,
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  // 变更包的 Runner 执行记录
+  app.get(R('/delivery/change-packages/:id/runner-runs'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'runner.runs.list');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'runner_run' } });
+    sendJson(res, 200, {
+      data: await stp.listRunnerRuns(tenantId, project.id, req.params.id, { step: req.query.step || null }),
+    });
+  });
+
+  // 单条 Runner 执行记录（含脱敏日志）
+  app.get(R('/delivery/runner-runs/:runId'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'runner.run.get');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'runner_run' } });
+    sendJson(res, 200, { data: await stp.getRunnerRun(tenantId, project.id, req.params.runId) });
+  });
+
+  // DoD 独立复现：在全新独立工作区重跑 build+test，对比 exit code + 产物 hash
+  app.post(R('/delivery/change-packages/:id/reproduce'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'runner.reproduce');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'runner_run' } });
+    const out = await withTenant(tenantId, () => stp.reproduce({
+      tenantId, projectId: project.id, actorId: c.actorId, changePackageId: req.params.id,
     }));
     sendJson(res, 200, { data: out });
   });

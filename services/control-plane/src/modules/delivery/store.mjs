@@ -465,3 +465,103 @@ export async function decideGateException(tenantId, id, { approved, decidedBy, r
   if (upd.changes === 0) throw Errors.conflict('例外审批单已被处理（可能并发决议）');
   return getGateException(tenantId, id);
 }
+
+// ---------- runner_runs（run_）：隔离 Runner 执行记录 ----------
+export const RUNNER_STEPS = new Set(['build', 'test', 'scan', 'package']);
+export const RUNNER_STATUSES = new Set(['pending', 'running', 'passed', 'failed', 'timeout', 'killed']);
+
+const normRun = (r) => r && {
+  ...r,
+  simulated: r.simulated === 1,
+  commands: parseJson(r.commands_json, []),
+  env: parseJson(r.env_json, {}),
+  workspace_ref: parseJson(r.workspace_ref, {}),
+  limits: parseJson(r.limits_json, {}),
+  artifacts: parseJson(r.artifacts_json, []),
+};
+
+export async function createRunnerRun({ tenantId, projectId, changePackageId, step, name = '',
+  commands = [], env = {}, workspaceRef = {}, limits = {}, createdBy }) {
+  if (!RUNNER_STEPS.has(step)) throw Errors.badRequest(`step 非法: ${step}（仅 build|test|scan|package）`);
+  const row = {
+    id: newId('run'), tenant_id: tenantId, project_id: projectId,
+    change_package_id: changePackageId, step, name: str(name).slice(0, 128),
+    status: 'pending', exit_code: null, signal: null, simulated: 0,
+    commands_json: JSON.stringify(commands || []),
+    env_json: JSON.stringify(env || {}),
+    workspace_ref: JSON.stringify(workspaceRef || {}),
+    log_text: '', log_uri: '',
+    limits_json: JSON.stringify(limits || {}),
+    artifacts_json: '[]', duration_ms: null,
+    created_by: createdBy || null, started_at: null, finished_at: null, created_at: nowMs(),
+  };
+  await db().query(
+    `INSERT INTO runner_runs(id,tenant_id,project_id,change_package_id,step,name,status,exit_code,signal,
+      simulated,commands_json,env_json,workspace_ref,log_text,log_uri,limits_json,artifacts_json,duration_ms,
+      created_by,started_at,finished_at,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [row.id, row.tenant_id, row.project_id, row.change_package_id, row.step, row.name, row.status,
+     row.exit_code, row.signal, row.simulated, row.commands_json, row.env_json, row.workspace_ref, row.log_text,
+     row.log_uri, row.limits_json, row.artifacts_json, row.duration_ms,
+     row.created_by, row.started_at, row.finished_at, row.created_at]);
+  return getRunnerRun(tenantId, row.id);
+}
+
+export async function getRunnerRun(tenantId, id) {
+  assertId('run', id);
+  const rows = await db().query('SELECT * FROM runner_runs WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normRun(rows[0]) || null;
+}
+
+export async function listRunnerRuns(tenantId, changePackageId, { step } = {}) {
+  let sql = 'SELECT * FROM runner_runs WHERE tenant_id=? AND change_package_id=?';
+  const args = [tenantId, changePackageId];
+  if (step) {
+    if (!RUNNER_STEPS.has(step)) throw Errors.badRequest(`step 非法: ${step}`);
+    sql += ' AND step=?';
+    args.push(step);
+  }
+  sql += ' ORDER BY created_at DESC';
+  return (await db().query(sql, args)).map(normRun);
+}
+
+/** 取某 step 最近一次已完成的 run（供 reproduce 找基线） */
+export async function latestFinishedRunnerRun(tenantId, changePackageId, step) {
+  const rows = await db().query(
+    `SELECT * FROM runner_runs WHERE tenant_id=? AND change_package_id=? AND step=?
+     AND status IN ('passed','failed','timeout','killed') ORDER BY created_at DESC LIMIT 1`,
+    [tenantId, changePackageId, step]);
+  return normRun(rows[0]) || null;
+}
+
+export async function setRunnerRunRunning(tenantId, id, { simulated, limits, workspaceRef, startedAt }) {
+  await db().query(
+    `UPDATE runner_runs SET status='running', simulated=?, limits_json=?, workspace_ref=?,
+      started_at=? WHERE id=? AND tenant_id=? AND status='pending'`,
+    [simulated ? 1 : 0, JSON.stringify(limits || {}), JSON.stringify(workspaceRef || {}),
+     startedAt ?? nowMs(), id, tenantId]);
+  return getRunnerRun(tenantId, id);
+}
+
+export async function finishRunnerRun(tenantId, id, { status, exitCode = null, signal = null,
+  logText = '', logUri = '', artifacts = [], durationMs = null, finishedAt }) {
+  if (!RUNNER_STATUSES.has(status) || status === 'pending' || status === 'running') {
+    throw Errors.badRequest(`runner run 终态非法: ${status}`);
+  }
+  await db().query(
+    `UPDATE runner_runs SET status=?, exit_code=?, signal=?, log_text=?, log_uri=?,
+      artifacts_json=?, duration_ms=?, finished_at=? WHERE id=? AND tenant_id=?`,
+    [status, exitCode, signal, String(logText || ''), String(logUri || ''),
+     JSON.stringify(artifacts || []), durationMs, finishedAt ?? nowMs(), id, tenantId]);
+  return getRunnerRun(tenantId, id);
+}
+
+/** DoD 清单合并更新（build/test/scan/package/reproduce 各项打勾） */
+export async function updateDodChecklist(tenantId, id, patch) {
+  const cur = await getChangePackage(tenantId, id);
+  if (!cur) throw Errors.notFound('变更包不存在');
+  const merged = { ...(cur.dod_checklist || {}), ...(patch || {}) };
+  await db().query('UPDATE change_packages SET dod_checklist=?, updated_at=? WHERE id=? AND tenant_id=?',
+    [JSON.stringify(merged), nowMs(), id, tenantId]);
+  return getChangePackage(tenantId, id);
+}
