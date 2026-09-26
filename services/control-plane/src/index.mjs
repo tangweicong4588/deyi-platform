@@ -11,6 +11,9 @@ import { maybeBootstrap } from './modules/identity/bootstrap.mjs';
 import { registerIdentityRoutes } from './modules/identity/routes.mjs';
 import { registerGatewayRoutes } from './modules/gateway/routes.mjs';
 import { ensureSeedModels } from './modules/gateway/store.mjs';
+import { registerKnowledgeRoutes } from './modules/knowledge/routes.mjs';
+import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
+import { probeDocParse, getDocParseStatus } from './modules/knowledge/docling.mjs';
 import { isOpaEnabled } from './modules/policy/opa.mjs';
 import { getIdP } from './modules/identity/idp.mjs';
 
@@ -26,8 +29,8 @@ function adapterStatus() {
     idp: config.KEYCLOAK_URL ? 'keycloak(live)' : (config.DEV_IDP_SECRET ? 'dev-idp(fallback)' : 'none'),
     policy: isOpaEnabled() ? 'opa(live)' : 'builtin(fallback)',
     model_gateway: config.LITELLM_URL ? 'litellm(live)' : (config.allowDirectProvider ? 'direct(fallback)' : 'none'),
-    vector: config.QDRANT_URL ? 'qdrant(live)' : 'local-index(fallback)',
-    doc_parse: config.DOCLING_URL ? 'docling(live)' : 'builtin(fallback)',
+    vector: getVectorStatus(),
+    doc_parse: getDocParseStatus(),
     workflow: config.TEMPORAL_ADDRESS ? 'temporal(live)' : 'local(fallback)',
     audit_anchor: config.AUDIT_ANCHOR_URL ? 'configured' : 'none(本地哈希链)',
   };
@@ -39,6 +42,8 @@ async function main() {
   await migrate(db());
   await maybeBootstrap();
   await ensureSeedModels();
+  await probeVector().catch(() => {});
+  await probeDocParse().catch(() => {});
   getIdP(); // 打印 IdP 模式日志
 
   const app = createApp();
@@ -55,7 +60,8 @@ async function main() {
 
   registerIdentityRoutes(app);
   registerGatewayRoutes(app);
-  // P4+ 在此注册：knowledge / ontology / execution / evidence
+  registerKnowledgeRoutes(app);
+  // P5+ 在此注册：ontology / execution / evidence
 
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {

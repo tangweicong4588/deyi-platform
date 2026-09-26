@@ -19,9 +19,9 @@ import { upstreamFetch, engineKind, isRetryableStatus } from './engines.mjs';
 import { logger } from '../../kernel/logging.mjs';
 
 /** 项目解析：Key 绑定的项目优先（更窄），否则看 x-deyi-project 头（必须属于本租户） */
-async function resolveProject(req) {
+async function resolveProject(reqLike) {
   const c = ctx();
-  const pid = c.projectId || req.headers['x-deyi-project'] || null;
+  const pid = c.projectId || reqLike.headers?.['x-deyi-project'] || null;
   if (!pid) return null;
   const p = await getProject(c.tenantId, pid).catch(() => null);
   if (!p) throw Errors.forbidden('项目不存在或无权访问');
@@ -104,13 +104,20 @@ async function pipeStream(upRes, res, meta) {
   }
 }
 
-async function guardAndRoute(req, endpoint) {
+/**
+ * 网关守卫：认证上下文 → 模型白名单 → 数据分级 → 项目解析 → 策略 → 预算。
+ * reqLike: { body, headers }（HTTP req 或内部调用构造的等价对象）。
+ * projectOverride: 内部调用方已解析好的项目（跳过头解析；Key 绑定的项目仍优先收窄）。
+ */
+async function guardAndRoute(reqLike, endpoint, projectOverride = undefined) {
   const c = requireTenant();
-  const body = req.body || {};
+  const body = reqLike.body || {};
+  const headers = reqLike.headers || {};
   if (!body.model) throw Errors.badRequest('model 必填');
   const model = await resolveModel(body.model);
-  const dataClass = checkDataClass(model, req.headers['x-deyi-data-class']);
-  const project = await resolveProject(req);
+  const dataClass = checkDataClass(model, headers['x-deyi-data-class']);
+  const keyProject = c.projectId ? await resolveProject({ headers: {} }) : null;
+  const project = keyProject || projectOverride || await resolveProject(reqLike);
   const est = estimateCost(model, body, endpoint);
   const budgets = await budgetState(c.tenantId, project);
 
@@ -229,8 +236,55 @@ async function handleEmbeddings(req, res) {
   sendJson(res, 200, json);
 }
 
-export function registerGatewayRoutes(app) {
-  app.post('/v1/gw/chat/completions', authenticate, handleChat);
+/**
+ * embedInternal —— 内部 embedding 调用（知识平面等模块使用）。
+ *
+ * 复用当前请求的 tenant/actor/trace 上下文，完整经过网关链路：
+ * 模型白名单 → 数据分级 → 策略决策 → 预算预检 → 上游 → 计量回写。
+ * 平台内禁止直连 embedding provider，统一走这里。
+ *
+ * @returns { vectors: number[][], usage, model }
+ */
+export async function embedInternal({ model: modelName = 'deyi-embedding', input, project = null, dataClass = 'internal' }) {
+  const c = requireTenant();
+  const inputs = Array.isArray(input) ? input : [input];
+  if (!inputs.length || inputs.some((s) => typeof s !== 'string')) {
+    throw Errors.badRequest('input 必须是非空字符串或字符串数组');
+  }
+  const g = await guardAndRoute(
+    { body: { model: modelName, input: inputs }, headers: { 'x-deyi-data-class': dataClass } },
+    'embeddings', project);
+  const upstreamBody = {
+    model: g.model.litellm_model,
+    input: inputs,
+    user: c.actorId,
+    metadata: {
+      deyi_tenant_id: c.tenantId,
+      deyi_project_id: g.project?.id || null,
+      deyi_trace_id: c.traceId,
+    },
+  };
+  const t0 = nowMs();
+  const meta = {
+    tenantId: c.tenantId, project: g.project, actorId: c.actorId, traceId: c.traceId,
+    model: g.model, endpoint: 'embeddings',
+  };
+  const { json, usedModel, engineTag } = await callWithFallback(
+    '/v1/embeddings', upstreamBody, g.model, { traceId: c.traceId })
+    .catch(async (e) => {
+      await persistUsage({ ...meta, usage: {}, latencyMs: nowMs() - t0, status: 'error' }).catch(() => {});
+      throw e;
+    });
+  const usage = json.usage || {};
+  await persistUsage({ ...meta, usage, latencyMs: nowMs() - t0, status: 'ok' });
+  logger.info('gateway embeddings(internal)', {
+    model: g.model.name, via: usedModel, engine: engineTag,
+    batch: inputs.length, tokens: usage.total_tokens || 0,
+  });
+  return { vectors: (json.data || []).map((d) => d.embedding), usage, model: g.model };
+}
+
+export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions', authenticate, handleChat);
   app.post('/v1/gw/embeddings', authenticate, handleEmbeddings);
 
   // 模型目录（租户可见）

@@ -75,6 +75,15 @@ deny_reason contains "禁止跨项目读取知识" if {
 	input.action == "knowledge.read"; cross_project
 }
 
+# R4b: 知识写入需 operator+
+allow if {
+	input.action == "knowledge.ingest"
+	effective_rank(input.project.id) >= 2
+}
+deny_reason contains "知识写入需要 operator 角色" if {
+	input.action == "knowledge.ingest"; effective_rank(input.project.id) < 2
+}
+
 # R5: 本体发布需评审
 allow if {
 	input.action == "ontology.publish"

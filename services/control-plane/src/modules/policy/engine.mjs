@@ -73,6 +73,13 @@ export function decideBuiltin(input) {
     return allow('知识读取（项目内）');
   }
 
+  // R4b: 知识写入 —— 需要 operator+（项目级或租户级绑定）
+  if (action === 'knowledge.ingest') {
+    return rankOf(actor.roles, project?.id) >= 1
+      ? allow('知识写入（operator+）')
+      : deny('知识写入需要 operator 角色');
+  }
+
   // R5: 本体发布 —— 必须走评审（obligation 由本体服务落实为"需评审通过"状态）
   if (action === 'ontology.publish') {
     return rankOf(actor.roles, project?.id) >= 1
