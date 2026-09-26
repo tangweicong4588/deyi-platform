@@ -12,6 +12,7 @@ import { registerIdentityRoutes } from './modules/identity/routes.mjs';
 import { registerGatewayRoutes } from './modules/gateway/routes.mjs';
 import { ensureSeedModels } from './modules/gateway/store.mjs';
 import { registerKnowledgeRoutes } from './modules/knowledge/routes.mjs';
+import { registerOntologyRoutes } from './modules/ontology/routes.mjs';
 import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
 import { probeDocParse, getDocParseStatus } from './modules/knowledge/docling.mjs';
 import { isOpaEnabled } from './modules/policy/opa.mjs';
@@ -61,7 +62,8 @@ async function main() {
   registerIdentityRoutes(app);
   registerGatewayRoutes(app);
   registerKnowledgeRoutes(app);
-  // P5+ 在此注册：ontology / execution / evidence
+  registerOntologyRoutes(app);
+  // P6+ 在此注册：execution / evidence
 
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {

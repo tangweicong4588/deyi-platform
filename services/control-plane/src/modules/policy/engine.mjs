@@ -87,6 +87,13 @@ export function decideBuiltin(input) {
       : deny('本体发布需要 operator 角色');
   }
 
+  // R5b: 本体写入（提交候选/转评审/驳回/废止/冲突裁决）—— 需要 operator+
+  if (action === 'ontology.write') {
+    return rankOf(actor.roles, project?.id) >= 1
+      ? allow('本体写入（operator+）')
+      : deny('本体写入需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }

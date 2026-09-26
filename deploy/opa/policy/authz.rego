@@ -96,6 +96,15 @@ deny_reason contains "本体发布需要 operator 角色" if {
 	input.action == "ontology.publish"; effective_rank(input.project.id) < 2
 }
 
+# R5b: 本体写入需 operator+
+allow if {
+	input.action == "ontology.write"
+	effective_rank(input.project.id) >= 2
+}
+deny_reason contains "本体写入需要 operator 角色" if {
+	input.action == "ontology.write"; effective_rank(input.project.id) < 2
+}
+
 reason := [r | some r in deny_reason][0] if { not allow } else := "default allow"
 
 result := {

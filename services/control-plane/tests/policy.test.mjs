@@ -58,6 +58,16 @@ test('本体发布：viewer 拒绝，operator 放行但需评审', async () => {
   assert.ok(r2.obligations.includes('review_required'));
 });
 
+test('本体写入：viewer 拒绝，operator 放行', async () => {
+  const viewer = { ...base, actor: { ...base.actor, roles: [{ project_id: 'prj_x', role: 'viewer' }] } };
+  const r1 = await decide({ ...viewer, action: 'ontology.write' });
+  assert.equal(r1.allow, false);
+
+  const op = { ...base, actor: { ...base.actor, roles: [{ project_id: null, role: 'operator' }] } };
+  const r2 = await decide({ ...op, action: 'ontology.write' });
+  assert.equal(r2.allow, true);
+});
+
 test('未知动作 fail-closed', async () => {
   const r = await decide({ ...base, action: 'nuke.everything' });
   assert.equal(r.allow, false);
