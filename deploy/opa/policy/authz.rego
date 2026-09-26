@@ -105,6 +105,15 @@ deny_reason contains "本体写入需要 operator 角色" if {
 	input.action == "ontology.write"; effective_rank(input.project.id) < 2
 }
 
+# R5c: 工具注册需 operator+
+allow if {
+	input.action == "tool.register"
+	effective_rank(input.project.id) >= 2
+}
+deny_reason contains "工具注册需要 operator 角色" if {
+	input.action == "tool.register"; effective_rank(input.project.id) < 2
+}
+
 reason := [r | some r in deny_reason][0] if { not allow } else := "default allow"
 
 result := {

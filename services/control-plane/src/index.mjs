@@ -13,8 +13,10 @@ import { registerGatewayRoutes } from './modules/gateway/routes.mjs';
 import { ensureSeedModels } from './modules/gateway/store.mjs';
 import { registerKnowledgeRoutes } from './modules/knowledge/routes.mjs';
 import { registerOntologyRoutes } from './modules/ontology/routes.mjs';
+import { registerExecutionRoutes } from './modules/execution/routes.mjs';
 import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
 import { probeDocParse, getDocParseStatus } from './modules/knowledge/docling.mjs';
+import { probeTemporal, getWorkflowStatus } from './modules/execution/temporal.mjs';
 import { isOpaEnabled } from './modules/policy/opa.mjs';
 import { getIdP } from './modules/identity/idp.mjs';
 
@@ -32,7 +34,7 @@ function adapterStatus() {
     model_gateway: config.LITELLM_URL ? 'litellm(live)' : (config.allowDirectProvider ? 'direct(fallback)' : 'none'),
     vector: getVectorStatus(),
     doc_parse: getDocParseStatus(),
-    workflow: config.TEMPORAL_ADDRESS ? 'temporal(live)' : 'local(fallback)',
+    workflow: getWorkflowStatus(),
     audit_anchor: config.AUDIT_ANCHOR_URL ? 'configured' : 'none(本地哈希链)',
   };
 }
@@ -45,6 +47,7 @@ async function main() {
   await ensureSeedModels();
   await probeVector().catch(() => {});
   await probeDocParse().catch(() => {});
+  await probeTemporal().catch(() => {});
   getIdP(); // 打印 IdP 模式日志
 
   const app = createApp();
@@ -63,7 +66,8 @@ async function main() {
   registerGatewayRoutes(app);
   registerKnowledgeRoutes(app);
   registerOntologyRoutes(app);
-  // P6+ 在此注册：execution / evidence
+  registerExecutionRoutes(app);
+  // P7 在此注册：evidence
 
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {

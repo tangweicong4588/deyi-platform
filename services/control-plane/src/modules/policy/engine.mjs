@@ -94,6 +94,13 @@ export function decideBuiltin(input) {
       : deny('本体写入需要 operator 角色');
   }
 
+  // R5c: 工具注册 —— 需要 operator+（项目级或租户级绑定）
+  if (action === 'tool.register') {
+    return rankOf(actor.roles, project?.id) >= 1
+      ? allow('工具注册（operator+）')
+      : deny('工具注册需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }
