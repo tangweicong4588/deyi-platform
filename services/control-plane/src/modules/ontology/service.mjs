@@ -11,6 +11,7 @@
 import { Errors } from '../../kernel/errors.mjs';
 import { db } from '../../db/index.mjs';
 import { logger } from '../../kernel/logging.mjs';
+import { tryAudit } from '../evidence/audit.mjs';
 import * as store from './store.mjs';
 
 const TRANSITIONS = {
@@ -106,13 +107,22 @@ export async function publishTerm({ tenantId, termId, actorId }) {
   }
   const term = await store.setStatus(tenantId, termId, 'published');
   logger.info('ontology published', { term: term.id, version: term.version, by: actorId });
+  await tryAudit({
+    tenantId, actorId, action: 'ontology.publish', resourceKind: 'term', resourceId: term.id,
+    payload: { version: term.version, name: term.name, superseded: deprecatedOld ? deprecatedOld.id : null },
+  });
   return { term, deprecatedOld };
 }
 
-export async function deprecateTerm({ tenantId, termId }) {
+export async function deprecateTerm({ tenantId, termId, actorId }) {
   const t = await mustGet(tenantId, termId);
   checkTransition(t.status, 'deprecated');
-  return store.setStatus(tenantId, termId, 'deprecated');
+  const term = await store.setStatus(tenantId, termId, 'deprecated');
+  await tryAudit({
+    tenantId, actorId, action: 'ontology.deprecate', resourceKind: 'term', resourceId: term.id,
+    payload: { version: term.version, name: term.name },
+  });
+  return term;
 }
 
 /**

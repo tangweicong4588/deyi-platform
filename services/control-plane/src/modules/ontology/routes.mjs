@@ -176,7 +176,7 @@ export function registerOntologyRoutes(app) {
       resource: { kind: 'ontology_term', projectId: project.id },
     });
     sendJson(res, 200, {
-      data: await withTenant(tenantId, () => svc.deprecateTerm({ tenantId, termId: req.params.termId })),
+      data: await withTenant(tenantId, () => svc.deprecateTerm({ tenantId, termId: req.params.termId, actorId: c.actorId })),
     });
   });
 

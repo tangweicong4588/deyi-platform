@@ -13,6 +13,7 @@ import { parseDocument, contentHash } from './docling.mjs';
 import { upsertChunks, deleteChunks, searchChunks } from './vector.mjs';
 import { embedInternal } from '../gateway/routes.mjs';
 import { getProject } from '../identity/store.mjs';
+import { tryAudit } from '../evidence/audit.mjs';
 import { logger } from '../../kernel/logging.mjs';
 
 const CHUNK_SIZE = 600;      // 字符
@@ -204,6 +205,10 @@ export async function ingestDocument({ tenantId, projectId, actorId, title, cont
     await grantRead(tenantId, docId, 'project', projectId, actorId); // 默认 ACL：所属项目可读
     await db().query(`UPDATE documents SET status='ready', updated_at=? WHERE id=?`, [nowMs(), docId]);
     logger.info('knowledge ingest done', { docId, chunks: facts.length, engine: parsed.engine });
+    await tryAudit({
+      tenantId, projectId, actorId, action: 'knowledge.ingest', resourceKind: 'document',
+      resourceId: docId, payload: { title, chunks: facts.length, parse_engine: parsed.engine, data_class: dataClass },
+    });
     return { document: await getDocument(tenantId, docId), canonical: { id: cndId, version: 1, content_hash: hash, parse_engine: parsed.engine }, chunks: facts.length };
   } catch (e) {
     await markFailed(docId, `索引失败：${e.message || e}`);
@@ -264,6 +269,10 @@ export async function shareDocument({ tenantId, projectId, documentId, granteePr
   if (gp.id === projectId) throw Errors.badRequest('无需共享给自己');
   const entry = await grantRead(tenantId, documentId, 'project', gp.id, actorId);
   logger.info('knowledge share', { documentId, from: projectId, to: gp.id });
+  await tryAudit({
+    tenantId, projectId, actorId, action: 'knowledge.share', resourceKind: 'document',
+    resourceId: documentId, payload: { grantee_project: gp.id },
+  });
   return entry;
 }
 

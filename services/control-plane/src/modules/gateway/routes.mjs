@@ -16,6 +16,7 @@ import { decide, inputFromRequest } from '../policy/index.mjs';
 import * as gstore from './store.mjs';
 import { resolveModel, checkDataClass, estimateCost, calcCostCents } from './router.mjs';
 import { upstreamFetch, engineKind, isRetryableStatus } from './engines.mjs';
+import { withSpan } from '../../kernel/tracing.mjs';
 import { logger } from '../../kernel/logging.mjs';
 
 /** 项目解析：Key 绑定的项目优先（更窄），否则看 x-deyi-project 头（必须属于本租户） */
@@ -189,8 +190,9 @@ async function handleChat(req, res) {
     tenantId: c.tenantId, project, actorId: c.actorId, traceId: c.traceId,
     model, endpoint: 'chat.completions',
   };
-  const { json, stream, usedModel, engineTag } = await callWithFallback(
-    '/v1/chat/completions', upstreamBody, model, { traceId: c.traceId })
+  const { json, stream, usedModel, engineTag } = await withSpan('gateway.model_call',
+    { 'model.name': model.name, 'gateway.endpoint': 'chat.completions' },
+    () => callWithFallback('/v1/chat/completions', upstreamBody, model, { traceId: c.traceId }))
     .catch(async (e) => {
       await persistUsage({ ...meta, usage: {}, latencyMs: nowMs() - t0, status: 'error' }).catch(() => {});
       throw e;
@@ -221,8 +223,9 @@ async function handleEmbeddings(req, res) {
     tenantId: c.tenantId, project, actorId: c.actorId, traceId: c.traceId,
     model, endpoint: 'embeddings',
   };
-  const { json, usedModel, engineTag } = await callWithFallback(
-    '/v1/embeddings', upstreamBody, model, { traceId: c.traceId })
+  const { json, usedModel, engineTag } = await withSpan('gateway.model_call',
+    { 'model.name': model.name, 'gateway.endpoint': 'embeddings' },
+    () => callWithFallback('/v1/embeddings', upstreamBody, model, { traceId: c.traceId }))
     .catch(async (e) => {
       await persistUsage({ ...meta, usage: {}, latencyMs: nowMs() - t0, status: 'error' }).catch(() => {});
       throw e;

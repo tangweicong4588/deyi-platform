@@ -14,6 +14,9 @@ import { ensureSeedModels } from './modules/gateway/store.mjs';
 import { registerKnowledgeRoutes } from './modules/knowledge/routes.mjs';
 import { registerOntologyRoutes } from './modules/ontology/routes.mjs';
 import { registerExecutionRoutes } from './modules/execution/routes.mjs';
+import { registerEvidenceRoutes } from './modules/evidence/routes.mjs';
+import { initEvidence } from './modules/evidence/audit.mjs';
+import { tracingMiddleware, isTracingEnabled } from './kernel/tracing.mjs';
 import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
 import { probeDocParse, getDocParseStatus } from './modules/knowledge/docling.mjs';
 import { probeTemporal, getWorkflowStatus } from './modules/execution/temporal.mjs';
@@ -36,6 +39,7 @@ function adapterStatus() {
     doc_parse: getDocParseStatus(),
     workflow: getWorkflowStatus(),
     audit_anchor: config.AUDIT_ANCHOR_URL ? 'configured' : 'none(本地哈希链)',
+    tracing: isTracingEnabled() ? 'otlp(live)' : 'noop',
   };
 }
 
@@ -43,6 +47,7 @@ async function main() {
   logger.info('control-plane starting', { env: config.DEYI_ENV, version: '0.5.0' });
   await openDb();
   await migrate(db());
+  await initEvidence();
   await maybeBootstrap();
   await ensureSeedModels();
   await probeVector().catch(() => {});
@@ -51,6 +56,8 @@ async function main() {
   getIdP(); // 打印 IdP 模式日志
 
   const app = createApp();
+  app.use(tracingMiddleware); // http.server span；无 OTEL 端点时 no-op
+  logger.info('tracing', { otlp: isTracingEnabled() ? 'enabled' : 'disabled(no-op)' });
 
   app.get('/healthz', async (req, res) => sendJson(res, 200, { status: 'ok' }));
   app.get('/readyz', async (req, res) => {
@@ -67,7 +74,7 @@ async function main() {
   registerKnowledgeRoutes(app);
   registerOntologyRoutes(app);
   registerExecutionRoutes(app);
-  // P7 在此注册：evidence
+  registerEvidenceRoutes(app);
 
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {

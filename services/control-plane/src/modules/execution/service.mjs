@@ -24,6 +24,7 @@ import { decide, inputFromRequest } from '../policy/index.mjs';
 import { logger } from '../../kernel/logging.mjs';
 import * as mcp from './mcp.mjs';
 import * as temporal from './temporal.mjs';
+import { tryAudit } from '../evidence/audit.mjs';
 
 // ---------- 脱敏 ----------
 const SECRET_KEY_RE = /secret|passwd|password|api[_-]?key|token|authorization|credential|private[_-]?key/i;
@@ -329,6 +330,10 @@ export async function invokeTool({ tenantId, projectId, actorId, traceId, toolId
     const existing = ins.__existing || (await db().query(
       'SELECT * FROM executions WHERE tenant_id=? AND idempotency_key=?', [tenantId, key]))[0];
     logger.info('execution deduplicated', { key, exe: existing?.id });
+    await tryAudit({
+      tenantId, projectId, actorId, traceId, action: 'tool.invoke', resourceKind: 'execution',
+      resourceId: existing?.id, payload: { tool_id: tool.id, action, deduplicated: true },
+    });
     return { execution: existing, deduplicated: true };
   }
 
@@ -344,12 +349,20 @@ export async function invokeTool({ tenantId, projectId, actorId, traceId, toolId
         [aprId, nowMs(), exeId]);
     });
     logger.info('execution pending approval', { exe: exeId, approval: aprId, tool: tool.name });
+    await tryAudit({
+      tenantId, projectId, actorId, traceId, action: 'tool.invoke', resourceKind: 'execution',
+      resourceId: exeId, payload: { tool_id: tool.id, action, args_hash: argsHash, approval_id: aprId, pending_approval: true },
+    });
     throw Errors.approvalRequired(aprId);
   }
 
   // 补偿链先落库（执行前注册，保证失败可补偿）
   await registerCompensations(exeId, compensations, tenantId);
   await setExecutionStatus(exeId, 'approved');
+  await tryAudit({
+    tenantId, projectId, actorId, traceId, action: 'tool.invoke', resourceKind: 'execution',
+    resourceId: exeId, payload: { tool_id: tool.id, action, args_hash: argsHash },
+  });
   return { execution: await runExecution(exeId), deduplicated: false };
 }
 
@@ -520,6 +533,11 @@ export async function decideApproval({ tenantId, projectId, approvalId, actorId,
   if (exeUpd.changes === 0) throw Errors.conflict(`执行状态异常: ${execution.status}`);
   logger.info(approved ? 'execution approved' : 'execution rejected',
     { exe: execution.id, approval: approvalId, by: actorId });
+  await tryAudit({
+    tenantId, projectId, actorId, action: approved ? 'tool.approve' : 'tool.reject',
+    resourceKind: 'approval', resourceId: approvalId,
+    payload: { execution_id: execution.id, reason: reason || null },
+  });
   if (!approved) {
     return { approval: await getApprovalRaw(approvalId), execution: await getExecutionRaw(execution.id) };
   }
