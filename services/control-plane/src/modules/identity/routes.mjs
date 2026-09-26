@@ -11,13 +11,15 @@ import { Errors } from '../../kernel/errors.mjs';
 import { ctx } from '../../kernel/context.mjs';
 import { assertId } from '../../kernel/ids.mjs';
 import {
-  createTenant, listTenants, getTenant,
+  createTenant, listTenants, getTenant, setTenantStatus, updateTenant, getTenantQuotas,
   createProject, listProjects,
   createActor, getActor,
   createApiKeyRow, listApiKeys, revokeApiKey,
   bindRole, getRoleBindings,
 } from './store.mjs';
+import { provisionTenant } from './provision.mjs';
 import { mintKey } from './keys.mjs';
+import { tryAudit } from '../evidence/audit.mjs';
 import {
   authenticate, requireOperator, requireTenantRole, tenantScope,
 } from './middleware.mjs';
@@ -27,12 +29,50 @@ const ok = (res, data, status = 200) => sendJson(res, status, { data });
 export function registerIdentityRoutes(app) {
   // ---------- 平台运维：租户 ----------
   app.post('/v1/admin/tenants', authenticate, requireOperator, async (req, res) => {
-    const { name, slug } = req.body || {};
+    const { name, slug, plan, quotas } = req.body || {};
     if (!name) throw Errors.badRequest('name 必填');
-    ok(res, await createTenant({ name, slug }), 201);
+    ok(res, await createTenant({ name, slug, plan, quotas }), 201);
   });
   app.get('/v1/admin/tenants', authenticate, requireOperator, async (req, res) => {
     ok(res, await listTenants());
+  });
+  // V2.1-B：原子开通——租户+默认项目+管理员+admin 角色+API Key，同一事务
+  app.post('/v1/admin/tenants/provision', authenticate, requireOperator, async (req, res) => {
+    const out = await provisionTenant(req.body || {});
+    await tryAudit({
+      tenantId: out.tenant.id, projectId: out.project.id, actorId: out.actor.id,
+      action: 'tenant.provision', resourceKind: 'tenant', resourceId: out.tenant.id,
+      payload: { plan: out.tenant.plan, project_id: out.project.id, actor_id: out.actor.id },
+    });
+    ok(res, out, 201);
+  });
+  // V2.1-B：租户资料/套餐/配额更新
+  app.patch('/v1/admin/tenants/:tenantId', authenticate, requireOperator, async (req, res) => {
+    const { name, slug, plan, quotas } = req.body || {};
+    const tenant = await updateTenant(req.params.tenantId, { name, slug, plan, quotas });
+    await tryAudit({
+      tenantId: tenant.id, actorId: ctx().actorId,
+      action: 'tenant.update', resourceKind: 'tenant', resourceId: tenant.id,
+      payload: { plan: tenant.plan, quotas: getTenantQuotas(tenant) },
+    });
+    ok(res, tenant);
+  });
+  // V2.1-B：停用 / 恢复。停用后该租户所有 API Key/JWT 立即 401（verifyApiKey/中间件已强制）。
+  app.post('/v1/admin/tenants/:tenantId/suspend', authenticate, requireOperator, async (req, res) => {
+    const tenant = await setTenantStatus(req.params.tenantId, 'suspended');
+    await tryAudit({
+      tenantId: tenant.id, actorId: ctx().actorId,
+      action: 'tenant.suspend', resourceKind: 'tenant', resourceId: tenant.id, payload: {},
+    });
+    ok(res, tenant);
+  });
+  app.post('/v1/admin/tenants/:tenantId/resume', authenticate, requireOperator, async (req, res) => {
+    const tenant = await setTenantStatus(req.params.tenantId, 'active');
+    await tryAudit({
+      tenantId: tenant.id, actorId: ctx().actorId,
+      action: 'tenant.resume', resourceKind: 'tenant', resourceId: tenant.id, payload: {},
+    });
+    ok(res, tenant);
   });
 
   // ---------- 租户 admin：项目 ----------

@@ -8,6 +8,7 @@
  *   只存放在 *_bindings 映射表里，绝不作为领域对象主键。
  */
 import { randomBytes } from 'node:crypto';
+import { Errors } from './errors.mjs';
 
 const ALPHABET = '0123456789abcdefghjkmnpqrstuvwxyz'; // base32 小写，去掉易混淆字符
 
@@ -25,12 +26,13 @@ export function newId(prefix) {
   return `${prefix}_${rand(26)}`;
 }
 
-/** 校验平台 ID 格式（防御性：外部输入的 ID 先过这一关） */
+/** 校验平台 ID 格式（防御性：外部输入的 ID 先过这一关）。
+ *  格式非法是客户端错误 → 400，不 500。 */
 export function assertId(prefix, value) {
   // 字符类直接从 ALPHABET 派生，避免手写遗漏
   const re = new RegExp(`^${prefix}_[${ALPHABET}]{26}$`);
   if (typeof value !== 'string' || !re.test(value)) {
-    throw new Error(`非法 ${prefix} ID: ${String(value).slice(0, 40)}`);
+    throw Errors.badRequest(`非法 ${prefix} ID: ${String(value).slice(0, 40)}`);
   }
   return value;
 }
