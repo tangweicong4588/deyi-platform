@@ -218,7 +218,11 @@ export async function setGrantStatus(tenantId, id, status) {
 }
 
 // ---------- 执行记录（action_executions） ----------
-const normExec = (r) => r && { ...r, result_summary: r.result_summary ?? '{}' };
+const normExec = (r) => r && {
+  ...r,
+  result_summary: r.result_summary ?? '{}',
+  verify_result: (() => { try { return JSON.parse(r.verify_result ?? '{}'); } catch { return {}; } })(),
+};
 
 export async function getBusinessExecution(tenantId, id) {
   assertId('bxn', id);
@@ -248,11 +252,16 @@ export async function insertBusinessExecution({ tenantId, projectId, actionId, g
   return normExec(row);
 }
 
+export const VERIFY_STATUSES = new Set(['unverified', 'verified', 'mismatched', 'unverifiable']);
+
 export async function updateBusinessExecution(tenantId, id, patch) {
   const sets = [];
   const args = [];
-  for (const k of ['external_ref', 'result_summary', 'status']) {
-    if (patch[k] !== undefined) { sets.push(`${k}=?`); args.push(patch[k]); }
+  for (const k of ['external_ref', 'result_summary', 'status', 'verify_status', 'verify_result', 'verified_at']) {
+    if (patch[k] !== undefined) {
+      if (k === 'verify_status' && !VERIFY_STATUSES.has(patch[k])) throw new Error(`非法验证状态: ${patch[k]}`);
+      sets.push(`${k}=?`); args.push(patch[k]);
+    }
   }
   if (!sets.length) return getBusinessExecution(tenantId, id);
   sets.push('finished_at=CASE WHEN ? IN (\'succeeded\',\'failed\',\'compensated\') THEN ? ELSE finished_at END');
@@ -262,26 +271,82 @@ export async function updateBusinessExecution(tenantId, id, patch) {
   return getBusinessExecution(tenantId, id);
 }
 
-// ---------- 对账队列（reconciliation_items；V2.0-C 消费，本阶段只写入） ----------
-export async function insertReconciliation({ tenantId, projectId, actionId, executionId, reason }) {
+// ---------- 对账队列（reconciliation_items；V2.0-C 消费） ----------
+export const RECON_STATUSES = new Set(['open', 'investigating', 'resolved', 'escalated', 'closed']);
+export const RECON_SOURCES = new Set(['execute', 'verify']);
+
+const normRecon = (r) => r && { ...r, resolution: J.parse(r.resolution, {}) };
+
+export async function insertReconciliation({ tenantId, projectId, actionId, executionId, reason, source = 'execute' }) {
+  if (!RECON_SOURCES.has(source)) throw new Error(`非法对账来源: ${source}`);
   const now = nowMs();
   const row = {
     id: newId('brec'), tenant_id: tenantId, project_id: projectId,
     action_id: actionId || null, execution_id: executionId || null,
-    reason: String(reason || '').slice(0, 1000), status: 'open',
-    created_at: now, updated_at: now,
+    reason: String(reason || '').slice(0, 1000), source, status: 'open',
+    assignee: null, resolution: '{}',
+    created_at: now, updated_at: now, decided_at: null, closed_at: null,
   };
   await db().query(
-    `INSERT INTO reconciliation_items(id,tenant_id,project_id,action_id,execution_id,reason,status,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO reconciliation_items(id,tenant_id,project_id,action_id,execution_id,reason,source,
+       status,assignee,resolution,created_at,updated_at,decided_at,closed_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [row.id, row.tenant_id, row.project_id, row.action_id, row.execution_id,
-     row.reason, row.status, row.created_at, row.updated_at]);
-  return row;
+     row.reason, row.source, row.status, row.assignee, row.resolution,
+     row.created_at, row.updated_at, row.decided_at, row.closed_at]);
+  return normRecon(row);
 }
 
-export async function listReconciliations(tenantId, { status = 'open' } = {}) {
+export async function getReconciliation(tenantId, id) {
+  assertId('brec', id);
+  const rows = await db().query('SELECT * FROM reconciliation_items WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normRecon(rows[0]) || null;
+}
+
+/** 同一执行记录的未关闭对账项（防重复建队；open/investigating/escalated 视为未关闭） */
+export async function getOpenReconciliationByExecution(tenantId, executionId) {
   const rows = await db().query(
-    'SELECT * FROM reconciliation_items WHERE tenant_id=? AND status=? ORDER BY created_at DESC LIMIT 200',
-    [tenantId, status]);
-  return rows;
+    `SELECT * FROM reconciliation_items WHERE tenant_id=? AND execution_id=?
+     AND status IN ('open','investigating','escalated') ORDER BY created_at DESC LIMIT 1`,
+    [tenantId, executionId]);
+  return normRecon(rows[0]) || null;
+}
+
+export async function listReconciliations(tenantId, { status = 'open', source = null, executionId = null, limit = 200 } = {}) {
+  let sql = 'SELECT * FROM reconciliation_items WHERE tenant_id=?';
+  const args = [tenantId];
+  if (status) {
+    if (!RECON_STATUSES.has(status)) throw new Error(`非法对账状态: ${status}`);
+    sql += ' AND status=?'; args.push(status);
+  }
+  if (source) {
+    if (!RECON_SOURCES.has(source)) throw new Error(`非法对账来源: ${source}`);
+    sql += ' AND source=?'; args.push(source);
+  }
+  if (executionId) { sql += ' AND execution_id=?'; args.push(executionId); }
+  sql += ' ORDER BY created_at DESC LIMIT ?';
+  args.push(Math.min(Math.max(Number(limit) || 200, 1), 500));
+  return (await db().query(sql, args)).map(normRecon);
+}
+
+/** 列出全部状态的对账项（运营视角；默认仍按创建时间倒序） */
+export async function listAllReconciliations(tenantId, { source = null, limit = 200 } = {}) {
+  return listReconciliations(tenantId, { status: null, source, limit });
+}
+
+export async function updateReconciliation(tenantId, id, patch) {
+  const sets = [];
+  const args = [];
+  for (const k of ['status', 'assignee', 'resolution', 'decided_at', 'closed_at']) {
+    if (patch[k] !== undefined) {
+      if (k === 'status' && !RECON_STATUSES.has(patch[k])) throw new Error(`非法对账状态: ${patch[k]}`);
+      sets.push(`${k}=?`);
+      args.push(k === 'resolution' ? J.str(patch[k]) : patch[k]);
+    }
+  }
+  if (!sets.length) return getReconciliation(tenantId, id);
+  sets.push('updated_at=?');
+  args.push(nowMs(), id, tenantId);
+  await db().query(`UPDATE reconciliation_items SET ${sets.join(',')} WHERE id=? AND tenant_id=?`, args);
+  return getReconciliation(tenantId, id);
 }

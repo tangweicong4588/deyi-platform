@@ -18,6 +18,9 @@ import { db } from '../../db/index.mjs';
 import * as plan from './plan.mjs';
 import * as store from './store.mjs';
 import * as execute from './execute.mjs';
+import * as verify from './verify.mjs';
+import * as reconcile from './reconcile.mjs';
+import * as metrics from './metrics.mjs';
 
 async function scopedProject(req, minRank, opName) {
   const c = ctx();
@@ -174,5 +177,63 @@ export function registerBusinessRoutes(app) {
     const e = await store.getBusinessExecution(tenantId, req.params.executionId);
     if (!e || e.project_id !== project.id) throw Errors.notFound('执行记录不存在');
     sendJson(res, 200, { data: e });
+  });
+
+  // ---- 验证（V2.0-C）：执行后 read-back，对账处理需 operator+ ----
+  app.post(R('/business/executions/:executionId/verify'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'execution.verify');
+    await policyCheck({ actor, tenantId, project, action: 'business.write', resource: { kind: 'business_execution' } });
+    const out = await withTenant(tenantId, () => verify.verifyExecution({
+      tenantId, projectId: project.id, executionId: req.params.executionId, actorId: c.actorId,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  // ---- 对账队列 ----
+  app.get(R('/business/reconciliation'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'reconciliation.list');
+    await policyCheck({ actor, tenantId, project, action: 'business.read', resource: { kind: 'reconciliation_item' } });
+    const q = req.query || {};
+    const data = await reconcile.listRecons({
+      tenantId, projectId: project.id,
+      status: q.status || 'open', source: q.source || null,
+      limit: q.limit ? Number(q.limit) : 200,
+    });
+    sendJson(res, 200, { data });
+  });
+
+  app.get(R('/business/reconciliation/:reconId'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'reconciliation.get');
+    await policyCheck({ actor, tenantId, project, action: 'business.read', resource: { kind: 'reconciliation_item' } });
+    const data = await reconcile.getRecon({ tenantId, projectId: project.id, reconId: req.params.reconId });
+    sendJson(res, 200, { data });
+  });
+
+  for (const [seg, to] of [
+    ['investigate', 'investigating'], ['resolve', 'resolved'],
+    ['escalate', 'escalated'], ['close', 'closed'],
+  ]) {
+    app.post(R(`/business/reconciliation/:reconId/${seg}`), authenticate, async (req, res) => {
+      const { project, tenantId, actor, c } = await scopedProject(req, 1, `reconciliation.${seg}`);
+      await policyCheck({ actor, tenantId, project, action: 'business.write', resource: { kind: 'reconciliation_item' } });
+      const body = req.body || {};
+      const data = await withTenant(tenantId, () => reconcile.transitionRecon({
+        tenantId, projectId: project.id, reconId: req.params.reconId, to,
+        actorId: c.actorId, note: body.note, assignee: body.assignee, evidenceRef: body.evidence_ref,
+      }));
+      sendJson(res, 200, { data });
+    });
+  }
+
+  // ---- 运营指标（只读聚合） ----
+  app.get(R('/business/metrics'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'metrics.get');
+    await policyCheck({ actor, tenantId, project, action: 'business.read', resource: { kind: 'business_metrics' } });
+    const q = req.query || {};
+    const data = await metrics.funnelMetrics({
+      tenantId, projectId: project.id,
+      since: q.since ? Number(q.since) : null, until: q.until ? Number(q.until) : null,
+    });
+    sendJson(res, 200, { data });
   });
 }
