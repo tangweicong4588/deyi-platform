@@ -1,8 +1,12 @@
 /**
- * adapters/memory/memory.mjs —— 记忆（Mem0 + Graphiti）适配器扩展点（stub）。
+ * adapters/memory/memory.mjs —— 记忆（Mem0 + Graphiti）外部引擎扩展点（stub）。
  *
- * Review-R6 数据 review 如实声明：记忆底座当前**未实现**，本文件只定义接口，
- * 调用即抛 ADAPTER_NOT_IMPLEMENTED。不要在对外材料中宣称平台已具备记忆能力。
+ * 架构决策（V2.2-A，见 GOAL.md）：记忆治理（分层/可见性/TTL/遗忘/提升/审计）由控制面
+ * 自研实现（src/modules/memory/，PG 真相源），向量召回走 Qdrant 派生索引（V2.2-B）。
+ * 本文件是「外部记忆引擎」替换召回/管理实现时的适配器扩展点：
+ * Mem0（记忆管理服务）/ Graphiti（时序知识图谱，需 Neo4j）均需 Docker 可用环境联调，
+ * 在提交者环境无法验证，故不伪造一个"已对接"的薄适配层——接口先行，实现待联调。
+ * 调用即抛 ADAPTER_NOT_IMPLEMENTED。不要在对外材料中宣称平台已对接 Mem0/Graphiti。
  *
  * 方案中的记忆治理要求（实现时必须满足）：
  * - 分层：工作记忆（会话内）/ 情景记忆（项目内事件）/ 语义记忆（提炼事实）；

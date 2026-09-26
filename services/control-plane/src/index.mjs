@@ -18,6 +18,7 @@ import { registerEvidenceRoutes } from './modules/evidence/routes.mjs';
 import { registerDeliveryRoutes } from './modules/delivery/routes.mjs';
 import { registerBusinessRoutes } from './modules/business/routes.mjs';
 import { registerNotifyRoutes } from './modules/notify/routes.mjs';
+import { registerMemoryRoutes } from './modules/memory/routes.mjs';
 import { initEvidence } from './modules/evidence/audit.mjs';
 import { tracingMiddleware, isTracingEnabled } from './kernel/tracing.mjs';
 import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
@@ -87,6 +88,7 @@ async function main() {
   registerDeliveryRoutes(app);
   registerBusinessRoutes(app);
   registerNotifyRoutes(app);
+  registerMemoryRoutes(app);
 
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {
