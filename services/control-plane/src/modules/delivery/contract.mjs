@@ -133,8 +133,9 @@ export async function evaluateContract({ tenantId, projectId, changePackageId, a
   const passed = items.every((i) => i.status !== 'fail');
   const result = { change_package_id: chg.id, evaluated_at: nowMs(), passed, items };
   // 落库：handover 门禁读取 dod_checklist.contract 做联动
+  //（L4 业务 review：键名统一为 evaluated_at，原来 at/evaluated_at 混用）
   await store.updateDodChecklist(tenantId, chg.id, {
-    contract: { passed, at: result.evaluated_at, items },
+    contract: { passed, evaluated_at: result.evaluated_at, items },
   });
   await tryAudit({
     tenantId, projectId, actorId, action: 'delivery.contract.evaluate',

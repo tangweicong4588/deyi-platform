@@ -20,6 +20,7 @@ import { db } from '../../db/index.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
 import * as store from './store.mjs';
 import * as svc from './service.mjs';
+import { evaluateContract } from './contract.mjs';
 
 export const STAGE_ORDER = ['facts', 'requirements', 'clarify', 'develop', 'handover'];
 
@@ -93,22 +94,23 @@ async function evalDevelopGate({ tenantId, changePackage }) {
   return missing;
 }
 
-async function evalHandoverGate({ tenantId, changePackage }) {
+async function evalHandoverGate({ tenantId, projectId, actorId, changePackage }) {
   const missing = [];
   const arts = await store.listArtifacts(tenantId, changePackage.id);
   if (!arts.some((a) => a.kind === 'report')) missing.push('artifact:report');
   if (!String(changePackage.branch || '').trim()) missing.push('branch');
   if (changePackage.status !== 'verifying') missing.push(`change_package_verifying(当前:${changePackage.status})`);
-  // V1.0-E 门禁联动：产物合同结果接入 handover 门禁评估。读取已落库的合同评估结论
-  //（evaluateContract 写入 dod_checklist.contract），未通过且未豁免的项进入缺失清单，
-  // 可经门禁例外审批逐项 waive（与 advanceStage 的覆盖逻辑一致）。
-  // 注意：从未评估过合同的变更包保持 V1.0-B 旧语义（不新增缺失项），避免破坏既有行为。
-  const contract = (changePackage.dod_checklist || {}).contract;
-  if (contract && Array.isArray(contract.items)) {
-    for (const item of contract.items) {
-      if (item.status === 'fail') missing.push(item.key);
-    }
+  // V1.0-E 门禁联动：handover 门禁**现场重评估**产物合同（H-1/M-1 安全 review）。
+  // evaluateContract 只读落库证据（AC/各 step 最近运行/扫描汇总/草稿 PR），不重跑构建，
+  // 因此现场重算成本可控；fail-closed：从未评估/证据缺失 → fail 项进入缺失清单，
+  // 必须经"已批准且覆盖缺失项"的门禁例外逐项 waive 才能放行。评估结论落库备查。
+  const contract = await evaluateContract({
+    tenantId, projectId, changePackageId: changePackage.id, actorId,
+  }).catch((e) => ({ passed: false, items: [], error: String(e && e.message || e) }));
+  for (const item of contract.items || []) {
+    if (item.status === 'fail') missing.push(item.key);
   }
+  if (contract.error) missing.push('contract:evaluate_error');
   return missing;
 }
 
@@ -215,7 +217,11 @@ export async function advanceStage({ tenantId, projectId, actorId, runId, decisi
     }
   }
   const chg = await svc.getChangePackage(tenantId, projectId, run.change_package_id);
-  const missing = await GATE_EVAL[run.stage]({ tenantId, run, changePackage: chg, evidence });
+  // L1 业务 review：变更包已终态（cancelled/handed_over）时禁止再推进任何阶段
+  if (['cancelled', 'handed_over'].includes(chg.status)) {
+    throw Errors.badRequest(`变更包已终态(${chg.status})，不能推进流水线`, { code: 'INVALID_TRANSITION' });
+  }
+  const missing = await GATE_EVAL[run.stage]({ tenantId, projectId, actorId, run, changePackage: chg, evidence });
   const checkedAt = nowMs();
   const evidenceSummary = {
     artifacts: Array.isArray(evidence.artifacts) ? evidence.artifacts.slice(0, 50) : [],

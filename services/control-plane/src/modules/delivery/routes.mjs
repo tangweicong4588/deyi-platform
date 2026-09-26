@@ -127,7 +127,7 @@ export function registerDeliveryRoutes(app) {
     const { status, evidenceRef } = req.body || {};
     if (!status) throw Errors.badRequest('status 必填');
     const out = await withTenant(tenantId, () => svc.transitionAC(
-      tenantId, project.id, req.params.reqId, req.params.acId, status, evidenceRef));
+      tenantId, project.id, req.params.reqId, req.params.acId, status, evidenceRef, actor.id));
     sendJson(res, 200, { data: out });
   });
 

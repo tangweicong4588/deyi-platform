@@ -109,8 +109,14 @@ test('需求全链路：draft→clarifying→ready→in_progress→verifying→d
   const bad = await patch(`${D(project.id)}/requirements/${req.id}/acceptance-criteria/${ac1.id}`, { status: 'failed' });
   assert.equal(bad.status, 400);
 
+  // M-2 业务 review：AC 直接 waive 不再允许——必须先有已批准的门禁例外
   const w2 = await patch(`${D(project.id)}/requirements/${req.id}/acceptance-criteria/${ac2.id}`, { status: 'waived' });
-  assert.equal(w2.status, 200);
+  assert.equal(w2.status, 400);
+  assert.equal((await w2.json()).error.details.code, 'WAIVER_APPROVAL_REQUIRED');
+
+  // 本用例走通过路径：ac2 直接 passed（豁免的审批流见 pipeline 测试）
+  const p2 = await patch(`${D(project.id)}/requirements/${req.id}/acceptance-criteria/${ac2.id}`, { status: 'passed' });
+  assert.equal(p2.status, 200);
 
   // 全部通过/豁免后可进 verifying
   const v = await patch(`${D(project.id)}/requirements/${req.id}`, { status: 'verifying' });

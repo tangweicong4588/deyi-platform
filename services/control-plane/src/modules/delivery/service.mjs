@@ -150,11 +150,46 @@ export async function getAC(tenantId, projectId, requirementId, acId) {
   return a;
 }
 
-export async function transitionAC(tenantId, projectId, requirementId, acId, to, evidenceRef) {
+export async function transitionAC(tenantId, projectId, requirementId, acId, to, evidenceRef, actorId = null) {
   const a = await getAC(tenantId, projectId, requirementId, acId);
   if (!store.AC_STATUSES.has(to)) throw Errors.badRequest(`status 非法: ${to}`);
   checkTransition(AC_TRANSITIONS, a.status, to, '验收标准');
-  return store.setACStatus(tenantId, acId, to, evidenceRef || null);
+  // M-2 业务 review：AC 豁免不再是 delivery.write 一句话的事——contract.ac 把 waived
+  // 视为通过，若 waive 无需审批，"例外必须 DB approved 审批"原则就被绕过。
+  // 豁免前必须存在已批准的门禁例外（missing_items 含 contract.ac 或 ac:<id>）。
+  if (to === 'waived') {
+    const ok = await hasApprovedACWaiver(tenantId, projectId, requirementId, acId);
+    if (!ok) {
+      throw Errors.badRequest(
+        'AC 豁免需要先申请并获批门禁例外（missing_items 须含 contract.ac 或 ac:<id>）',
+        { code: 'WAIVER_APPROVAL_REQUIRED' });
+    }
+  }
+  const out = await store.setACStatus(tenantId, acId, to, evidenceRef || null);
+  if (to === 'waived') {
+    await tryAudit({
+      tenantId, projectId, actorId, action: 'delivery.ac.waive',
+      resourceKind: 'acceptance_criterion', resourceId: acId,
+      payload: { requirement_id: requirementId, evidence_ref: evidenceRef || null },
+    });
+  }
+  return out;
+}
+
+/** M-2：AC 关联变更包的流水线运行上是否存在已批准的豁免例外 */
+async function hasApprovedACWaiver(tenantId, projectId, requirementId, acId) {
+  const keys = new Set(['contract.ac', `ac:${acId}`]);
+  const chgs = await store.listChangePackages(tenantId, projectId, { requirementId }).catch(() => []);
+  for (const chg of chgs) {
+    const runs = await store.listPipelineRuns(tenantId, projectId, { changePackageId: chg.id }).catch(() => []);
+    for (const r of runs) {
+      const approved = await store.listGateExceptions(tenantId, r.id, { status: 'approved' }).catch(() => []);
+      for (const g of approved) {
+        if ((g.missing_items || []).some((m) => keys.has(m))) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // ---------- repo bindings ----------
@@ -211,13 +246,21 @@ export async function transitionChangePackage(tenantId, projectId, id, to, headC
         { code: 'GATE_BYPASS_DENIED' });
     }
   }
-  const out = await store.setChangePackageStatus(tenantId, id, to, headCommit || null);
+  const out = await store.setChangePackageStatus(tenantId, id, to, headCommit || null, c.status);
   // 变更包移交（ready_for_review）接入 P7 审计链（best-effort）
   if (to === 'ready_for_review') {
     await tryAudit({
       tenantId, projectId, action: 'change_package.handover',
       resourceKind: 'change_package', resourceId: id,
       payload: { status: 'ready_for_review', branch: c.branch, head_commit: headCommit || c.head_commit },
+    });
+  }
+  // M-20 业务 review：handed_over（交付完成）同样需要审计事件，原来只有 ready_for_review 有
+  if (to === 'handed_over') {
+    await tryAudit({
+      tenantId, projectId, action: 'change_package.handed_over',
+      resourceKind: 'change_package', resourceId: id,
+      payload: { from: c.status, branch: c.branch, head_commit: headCommit || c.head_commit },
     });
   }
   return out;

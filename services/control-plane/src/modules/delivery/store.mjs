@@ -198,10 +198,14 @@ export async function listChangePackages(tenantId, projectId, { requirementId } 
   return (await db().query(sql, args)).map(normChg);
 }
 
-export async function setChangePackageStatus(tenantId, id, status, headCommit = null) {
-  await db().query(
-    'UPDATE change_packages SET status=?, head_commit=COALESCE(?, head_commit), updated_at=? WHERE id=? AND tenant_id=?',
-    [status, headCommit, nowMs(), id, tenantId]);
+export async function setChangePackageStatus(tenantId, id, status, headCommit = null, expectedFrom = null) {
+  // L1 数据 review + M-3 业务 review：状态更新用 CAS（期望 from 状态），
+  // 防"verifying→ready_for_review/handed_over"并发/脏写。expectedFrom 为 null 时保持旧语义。
+  let sql = 'UPDATE change_packages SET status=?, head_commit=COALESCE(?, head_commit), updated_at=? WHERE id=? AND tenant_id=?';
+  const args = [status, headCommit, nowMs(), id, tenantId];
+  if (expectedFrom) { sql += ' AND status=?'; args.push(expectedFrom); }
+  const upd = await db().run(sql, args);
+  if (expectedFrom && upd.changes === 0) throw Errors.conflict(`变更包状态已被并发修改（期望 ${expectedFrom}）`);
   return getChangePackage(tenantId, id);
 }
 

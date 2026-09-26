@@ -344,6 +344,23 @@ test('全链路：develop 缺产物阻断 → 补齐通过；handover 通过 →
   assert.ok(m2.some((m) => String(m).startsWith('change_package_verifying')));
   await post(`${P()}/change-packages/${chgId}/artifacts`, { kind: 'report', contentHash: HASH });
   await patch(`${P()}/change-packages/${chgId}`, { status: 'verifying' });
+  // H-1/M-1 安全 review：handover 门禁现场重评估产物合同（fail-closed）。
+  // 合同证据缺失（AC 未验收、无 step 运行、无扫描汇总、无 PR）→ 阻断，
+  // 必须经门禁例外逐项 waive。
+  const hBlock = await advance(hoRun.run_id);
+  assert.equal(hBlock.status, 200);
+  const hMissing = (await hBlock.json()).data.missing;
+  assert.ok(hMissing.includes('contract.ac'), '合同未通过应进入缺失清单');
+  assert.ok(hMissing.some((m) => String(m).startsWith('contract.steps.')));
+  // 例外审批覆盖全部合同缺失项 → 批准 → 再次推进放行
+  const q = await post(`${P()}/pipeline-runs/${hoRun.run_id}/gate-exceptions`, {
+    missingItems: hMissing.filter((m) => String(m).startsWith('contract.')),
+    reason: '测试环境豁免合同证据',
+  });
+  assert.equal(q.status, 201);
+  const gex = (await q.json()).data;
+  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '测试豁免' });
+  assert.equal(d.status, 200);
   const hAdv = await advance(hoRun.run_id);
   assert.equal(hAdv.status, 200);
   assert.equal((await hAdv.json()).data.run.status, 'passed');
@@ -355,6 +372,47 @@ test('全链路：develop 缺产物阻断 → 补齐通过；handover 通过 →
     "SELECT * FROM audit_events WHERE tenant_id=? AND action='change_package.handover' AND resource_id=?",
     [tenant.id, chgId]);
   assert.ok(rows.length >= 1, 'change_package.handover 应写入审计链');
+});
+
+test('AC 豁免需已批准的门禁例外（M-2）：无审批 400，有审批放行', async () => {
+  const { reqId, chgId, clfRunId } = await toClarifyStage('AC 豁免审批流测试');
+  const ac = await post(`${P()}/requirements/${reqId}/acceptance-criteria`, { thenMd: '豁免测试', kind: 'manual' });
+  const acId = (await ac.json()).data.id;
+  await advance(clfRunId);
+  let view = await (await get(`${P()}/change-packages/${chgId}/pipeline`)).json();
+  const devRun = view.data.stages.find((s) => s.stage === 'develop');
+  await patch(`${P()}/change-packages/${chgId}`, { status: 'building', headCommit: 'def5678' });
+  for (const kind of ['diff', 'test_report', 'scan_report']) {
+    await post(`${P()}/change-packages/${chgId}/artifacts`, { kind, contentHash: HASH });
+  }
+  await advance(devRun.run_id);
+  await post(`${P()}/change-packages/${chgId}/artifacts`, { kind: 'report', contentHash: HASH });
+  await patch(`${P()}/change-packages/${chgId}`, { status: 'verifying' });
+  view = await (await get(`${P()}/change-packages/${chgId}/pipeline`)).json();
+  const hoRun = view.data.stages.find((s) => s.stage === 'handover');
+  const blocked = await advance(hoRun.run_id);
+  const missing = (await blocked.json()).data.missing;
+  assert.ok(missing.includes('contract.ac'));
+  // 无审批直接 waive → 400
+  const w1 = await patch(`${P()}/requirements/${reqId}/acceptance-criteria/${acId}`, { status: 'waived' });
+  assert.equal(w1.status, 400);
+  assert.equal((await w1.json()).error.details.code, 'WAIVER_APPROVAL_REQUIRED');
+  // 为 contract.ac 申请例外 → 批准 → 豁免放行
+  const q = await post(`${P()}/pipeline-runs/${hoRun.run_id}/gate-exceptions`, {
+    missingItems: ['contract.ac'], reason: '该 AC 不适用本次变更',
+  });
+  assert.equal(q.status, 201);
+  const gex = (await q.json()).data;
+  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '同意豁免' });
+  assert.equal(d.status, 200);
+  const w2 = await patch(`${P()}/requirements/${reqId}/acceptance-criteria/${acId}`, { status: 'waived' });
+  assert.equal(w2.status, 200);
+  assert.equal((await w2.json()).data.status, 'waived');
+  // 审计：delivery.ac.waive
+  const rows = await db().query(
+    "SELECT * FROM audit_events WHERE tenant_id=? AND action='delivery.ac.waive' AND resource_id=?",
+    [tenant.id, acId]);
+  assert.ok(rows.length >= 1, 'delivery.ac.waive 应写入审计链');
 });
 
 // ---------- 非法跃迁 / 权限 ----------
