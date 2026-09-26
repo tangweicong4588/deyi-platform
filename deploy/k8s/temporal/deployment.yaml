@@ -1,0 +1,52 @@
+# Temporal：长流程工作流。不可用时控制面降级为本地执行器。
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+  labels: { app: temporal }
+spec:
+  selector: { app: temporal }
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: 7233
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  labels: { app: temporal }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: temporal }
+  template:
+    metadata:
+      labels: { app: temporal }
+    spec:
+      initContainers:
+        - name: wait-postgres
+          image: busybox:1.36
+          command: ["sh", "-c", "until (echo > /dev/tcp/postgres/5432) 2>/dev/null; do echo waiting-postgres; sleep 3; done"]
+      containers:
+        - name: temporal
+          image: temporalio/auto-setup:1.24.0
+          ports:
+            - containerPort: 7233
+          env:
+            - name: DB
+              value: postgresql
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: deyi
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef: { name: deyi-secrets, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_SEEDS
+              value: postgres
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: config/dynamicconfig/docker.yaml
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2000m", memory: "4Gi" }

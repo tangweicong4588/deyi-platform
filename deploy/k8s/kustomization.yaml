@@ -1,0 +1,28 @@
+# Kustomize 入口：kubectl apply -k deploy/k8s/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: deyi
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - postgres/statefulset.yaml
+  - qdrant/statefulset.yaml
+  - keycloak/deployment.yaml
+  - litellm/deployment.yaml
+  - opa/deployment.yaml
+  - docling/deployment.yaml
+  - temporal/deployment.yaml
+  - control-plane/deployment.yaml
+
+# 从已有文件生成 ConfigMap（改 deploy/litellm/config.yaml 或
+# deploy/opa/policy/authz.rego 后重新 apply 即可生效）
+configMapGenerator:
+  - name: litellm-config
+    files:
+      - config.yaml=../litellm/config.yaml
+  - name: opa-policy
+    files:
+      - authz.rego=../opa/policy/authz.rego

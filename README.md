@@ -34,14 +34,17 @@ npm install
 BOOTSTRAP_ENABLED=true npm run dev   # 首次启动自动建租户并发放 admin key（仅开发）
 ```
 
-生产部署见 [deploy/docker-compose.yml](deploy/docker-compose.yml)。
+生产部署见 [deploy/README.md](deploy/README.md)（compose 一键启动 / K8s manifests /
+首次部署核验清单），运维文档在 [docs/runbooks/](docs/runbooks/)（日常运维、
+备份恢复、新租户上线 SOP）。
 
 ## 仓库结构
 
 ```
 deyi-platform/
-  docs/                  架构 / 运维文档
-  deploy/                docker-compose.yml、K8s manifests、OPA 策略包
+  docs/                  架构 / 运维文档（含 runbooks/：运维、备份恢复、租户上线 SOP）
+  deploy/                docker-compose.yml、.env.example、K8s manifests（k8s/）、
+                         OPA 策略包、LiteLLM 配置、部署指南（README.md）
   services/
     control-plane/       自研控制面（模块化单体，模块边界严格）
       src/kernel/        配置 / 日志 / ID / 上下文 / 错误 / HTTP / DB

@@ -1,0 +1,87 @@
+# 自研控制面。镜像需先构建并推送到自有仓库：
+#   docker build -t registry.example.com/deyi/control-plane:0.5.0 services/control-plane
+#   docker push registry.example.com/deyi/control-plane:0.5.0
+# 然后把下面的 image 换掉（或用 kustomize images 覆盖）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+  labels: { app: control-plane }
+spec:
+  selector: { app: control-plane }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  labels: { app: control-plane }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: control-plane }
+  template:
+    metadata:
+      labels: { app: control-plane }
+    spec:
+      initContainers:
+        - name: wait-postgres
+          image: busybox:1.36
+          command: ["sh", "-c", "until (echo > /dev/tcp/postgres/5432) 2>/dev/null; do echo waiting-postgres; sleep 3; done"]
+      containers:
+        - name: control-plane
+          image: deyi/control-plane:0.5.0
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef: { name: deyi-config }
+          env:
+            # 注意顺序：POSTGRES_PASSWORD 必须在 DATABASE_URL 之前，
+            # DATABASE_URL 里的 $(POSTGRES_PASSWORD) 依赖 k8s 的变量展开。
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: deyi-secrets, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: "postgres://deyi:$(POSTGRES_PASSWORD)@postgres:5432/deyi"
+            - name: OPERATOR_TOKEN
+              valueFrom:
+                secretKeyRef: { name: deyi-secrets, key: OPERATOR_TOKEN }
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: { name: deyi-secrets, key: LITELLM_MASTER_KEY }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1000m", memory: "1Gi" }
+---
+# Ingress 模板：按实际域名修改 host；TLS Secret 自行创建。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: control-plane
+  labels: { app: control-plane }
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"  # 文档上传
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: deyi.example.com  # ← 改成真实域名
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: control-plane
+                port: { number: 8080 }

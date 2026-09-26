@@ -1,23 +1,23 @@
 # 得逸智行平台 V0.5 —— 完整 OSS 基线（生产形态）
 #
 # 自研控制面（control-plane）+ 开源执行底座，全部通过适配层对接。
-# 注意：本文件未在提交者本机验证（无 Docker），首次部署前请在目标环境执行
-#   docker compose up --build
-# 并按 docs/deployment.md 做健康检查。
 #
-# 必设环境（写入 .env 或 export）：
-#   POSTGRES_PASSWORD=      # 强密码
-#   KEYCLOAK_ADMIN_PASSWORD=# 强密码
-#   LITELLM_MASTER_KEY=     # 内部 master key（仅 control-plane 与 litellm 之间）
-#   OPERATOR_TOKEN=         # 平台运维 token（强随机）
-#   DEYI_ENV=production
+# ⚠️ 未真实验证声明：本文件在提交者环境从未执行 `docker compose up`
+# （本机无 Docker）。首次部署前必须在目标环境按 deploy/README.md 的
+# "首次部署核验清单"逐项验证（docker pull 每个镜像、端口占用、卷权限）。
+#
+# 必设环境（复制 deploy/.env.example 为 .env 后填写，全部强随机、无真值入库）：
+#   POSTGRES_PASSWORD / KEYCLOAK_ADMIN_PASSWORD / LITELLM_MASTER_KEY /
+#   OPERATOR_TOKEN / DEFAULT_API_KEY（至少一个模型供应商 key）/
+#   AUDIT_ANCHOR_URL（生产必填，config 启动校验）
 
 name: deyi-platform
 
 services:
   # ---------- 真相源 ----------
   postgres:
-    image: postgres:16.4
+    image: postgres:16.4  # 已核验：docker hub 存在（2026-09-26）
+    restart: unless-stopped
     environment:
       POSTGRES_USER: deyi
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置}
@@ -32,15 +32,19 @@ services:
 
   # ---------- 向量索引（派生，可重建） ----------
   qdrant:
-    image: qdrant/qdrant:v1.11.0
+    image: qdrant/qdrant:v1.11.0  # 已核验：docker hub 存在（2026-09-26）
+    restart: unless-stopped
     volumes:
       - qdrantdata:/qdrant/storage
     ports:
       - "6333:6333"
+    # 健康由控制面启动探测（probeVector）+ /readyz adapters.vector 上报，
+    # 镜像内无 curl，不在此处加 healthcheck。
 
   # ---------- 身份（认证源；授权归平台） ----------
   keycloak:
-    image: quay.io/keycloak/keycloak:25.0.6
+    image: quay.io/keycloak/keycloak:25.0.6  # 已核验：quay 存在（2026-09-26）
+    restart: unless-stopped
     command: start
     environment:
       KC_DB: postgres
@@ -58,10 +62,13 @@ services:
 
   # ---------- 模型统一出口 ----------
   litellm:
-    image: ghcr.io/berriai/litellm:main-v1.52.0
+    image: ghcr.io/berriai/litellm:main-v1.52.0  # 已核验：ghcr 存在（2026-09-26）
+    restart: unless-stopped
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?必须设置}
+      DEFAULT_API_KEY: ${DEFAULT_API_KEY:?至少配置一个模型供应商 key}
+      DEFAULT_API_BASE: ${DEFAULT_API_BASE:-https://api.openai.com/v1}
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     ports:
@@ -69,7 +76,8 @@ services:
 
   # ---------- 策略决策引擎 ----------
   opa:
-    image: openpolicyagent/opa:0.68.0
+    image: openpolicyagent/opa:0.68.0  # 已核验：docker hub 存在（2026-09-26）
+    restart: unless-stopped
     command: ["run", "--server", "--addr", "0.0.0.0:8181", "/policy"]
     volumes:
       - ./opa/policy:/policy:ro
@@ -78,13 +86,17 @@ services:
 
   # ---------- 文档解析 ----------
   docling:
-    image: quay.io/docling-project/docling-serve:v0.7.0
+    # 注意：初稿曾写 v0.7.0，经 quay API 核验该 tag 不存在，
+    # 真实版本线为 v1.31.0+；此处用核验过的 v1.35.0（2026-09-26）。
+    image: quay.io/docling-project/docling-serve:v1.35.0
+    restart: unless-stopped
     ports:
       - "5001:5001"
 
   # ---------- 长流程工作流 ----------
   temporal:
-    image: temporalio/auto-setup:1.24.0
+    image: temporalio/auto-setup:1.24.0  # 已核验：docker hub 存在（2026-09-26）
+    restart: unless-stopped
     environment:
       DB: postgresql
       DB_PORT: "5432"
@@ -101,10 +113,12 @@ services:
   # ---------- 自研控制面 ----------
   control-plane:
     build: ../services/control-plane
+    restart: unless-stopped
     environment:
       DEYI_ENV: ${DEYI_ENV:-production}
       PORT: "8080"
       HOST: "0.0.0.0"
+      BOOTSTRAP_ENABLED: "false"  # 生产禁止自动 bootstrap
       DATABASE_URL: postgres://deyi:${POSTGRES_PASSWORD:?必须设置}@postgres:5432/deyi
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:?必须设置}
       KEYCLOAK_URL: http://keycloak:8080
@@ -122,7 +136,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)})"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -1,0 +1,58 @@
+# LiteLLM：模型统一出口。config.yaml 由 kustomization 从
+# deploy/litellm/config.yaml 生成（改一处即可）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  labels: { app: litellm }
+spec:
+  selector: { app: litellm }
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  labels: { app: litellm }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: litellm }
+  template:
+    metadata:
+      labels: { app: litellm }
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-v1.52.0
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports:
+            - containerPort: 4000
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: { name: deyi-secrets, key: LITELLM_MASTER_KEY }
+            - name: DEFAULT_API_KEY
+              valueFrom:
+                secretKeyRef: { name: deyi-secrets, key: DEFAULT_API_KEY }
+            # 注意：deyi-config 里没有这一项，它是 LiteLLM 自己的变量
+            - name: DEFAULT_API_BASE
+              value: "https://api.openai.com/v1"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /health, port: 4000 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "2000m", memory: "2Gi" }
+      volumes:
+        - name: config
+          configMap: { name: litellm-config }

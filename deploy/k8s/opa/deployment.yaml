@@ -1,0 +1,47 @@
+# OPA：策略决策引擎。策略由 kustomization 从
+# deploy/opa/policy/authz.rego 生成（与内置引擎语义一致）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa
+  labels: { app: opa }
+spec:
+  selector: { app: opa }
+  ports:
+    - name: http
+      port: 8181
+      targetPort: 8181
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opa
+  labels: { app: opa }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: opa }
+  template:
+    metadata:
+      labels: { app: opa }
+    spec:
+      containers:
+        - name: opa
+          image: openpolicyagent/opa:0.68.0
+          args: ["run", "--server", "--addr", "0.0.0.0:8181", "/policy"]
+          ports:
+            - containerPort: 8181
+          volumeMounts:
+            - name: policy
+              mountPath: /policy
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /health, port: 8181 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+      volumes:
+        - name: policy
+          configMap: { name: opa-policy }
