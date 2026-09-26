@@ -97,8 +97,19 @@ export function scrubText(s) {
     .slice(0, 500);
 }
 
+/** 参数哈希：稳定序列化（键递归排序）后再哈希。
+ * M-5 业务 review：原来裸 JSON.stringify，键序变化会导致 scope 核对误杀。 */
+function stableStringify(v) {
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const keys = Object.keys(v).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
 export function hashArgs(args) {
-  return createHash('sha256').update(JSON.stringify(args ?? null)).digest('hex');
+  return createHash('sha256').update(stableStringify(args ?? null)).digest('hex');
 }
 
 const trunc = (s, n = 4096) => {
@@ -520,18 +531,27 @@ export async function decideApproval({ tenantId, projectId, approvalId, actorId,
   // 审批人需要 operator+（路由层已做 rank 检查，这里纵深防御再查一次）
   const { effectiveRank } = await import('../identity/middleware.mjs');
   if (effectiveRank(roles, projectId) < 1) throw Errors.forbidden('审批需要 operator 及以上角色');
+  // H-1 安全 review：职责分离——审批人不能是申请人，否则 approval_required 形同虚设
+  if (approval.requested_by === actorId) throw Errors.forbidden('审批人不能是申请人（职责分离）');
 
   const now = nowMs();
   const newStatus = approved ? 'approved' : 'rejected';
-  // 原子 CAS：只有 pending 的审批单能被决议（防并发双重审批 → 重复执行）
-  const upd = await db().run(
-    `UPDATE approvals SET status=?, decided_by=?, reason=?, decided_at=? WHERE id=? AND status='pending'`,
-    [newStatus, actorId, reason || null, now, approvalId]);
-  if (upd.changes === 0) throw Errors.conflict('审批单已被处理（可能并发决议）');
-  const exeUpd = await db().run(
-    `UPDATE executions SET status=?, updated_at=? WHERE id=? AND status='pending_approval'`,
-    [newStatus, nowMs(), execution.id]);
-  if (exeUpd.changes === 0) throw Errors.conflict(`执行状态异常: ${execution.status}`);
+  // M4 数据 review：两次 CAS 更新放同一事务——原来进程在两次更新间崩溃会导致
+  // "审批单已终态、execution 永远卡 pending_approval 且无法重试"的死锁。
+  // approvals 表无 tenant_id 列（租户经 executions 关联，getApproval 已做租户限定校验）；
+  // executions 更新带 tenant_id 纵深。
+  await db().transaction(async (tx) => {
+    // 原子 CAS：只有 pending 的审批单能被决议（防并发双重审批 → 重复执行）
+    const upd = await tx.run(
+      `UPDATE approvals SET status=?, decided_by=?, reason=?, decided_at=?
+        WHERE id=? AND status='pending'`,
+      [newStatus, actorId, reason || null, now, approvalId]);
+    if (upd.changes === 0) throw Errors.conflict('审批单已被处理（可能并发决议）');
+    const exeUpd = await tx.run(
+      `UPDATE executions SET status=?, updated_at=? WHERE id=? AND tenant_id=? AND status='pending_approval'`,
+      [newStatus, nowMs(), execution.id, tenantId]);
+    if (exeUpd.changes === 0) throw Errors.conflict(`执行状态异常: ${execution.status}`);
+  });
   logger.info(approved ? 'execution approved' : 'execution rejected',
     { exe: execution.id, approval: approvalId, by: actorId });
   await tryAudit({

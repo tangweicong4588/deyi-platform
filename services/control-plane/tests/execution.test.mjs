@@ -156,7 +156,7 @@ const { registerIdentityRoutes } = await import('../src/modules/identity/routes.
 const { registerExecutionRoutes } = await import('../src/modules/execution/routes.mjs');
 const temporal = await import('../src/modules/execution/temporal.mjs');
 
-let tenant, tenantB, project, adminKey, viewerKey, tenantBKey, opToken = 'op_test_token';
+let tenant, tenantB, project, adminKey, approverKey, viewerKey, tenantBKey, opToken = 'op_test_token';
 before(async () => {
   await openDb();
   await migrate(db());
@@ -167,6 +167,12 @@ before(async () => {
   const k1 = mintKey();
   await store.createApiKeyRow({ tenantId: tenant.id, actorId: admin.id, name: 'ex-admin', prefix: k1.prefix, keyHash: k1.keyHash });
   adminKey = k1.secret;
+  // H-1 安全 review：审批人必须≠申请人，单独一个审批人 actor
+  const approver = await store.createActor(tenant.id, { kind: 'user', name: 'EX Approver' });
+  await store.bindRole(tenant.id, approver.id, null, 'admin');
+  const ka = mintKey();
+  await store.createApiKeyRow({ tenantId: tenant.id, actorId: approver.id, name: 'ex-approver', prefix: ka.prefix, keyHash: ka.keyHash });
+  approverKey = ka.secret;
   const viewer = await store.createActor(tenant.id, { kind: 'user', name: 'EX Viewer' });
   await store.bindRole(tenant.id, viewer.id, null, 'viewer');
   const k2 = mintKey();
@@ -233,7 +239,7 @@ test('高风险调用 → 审批流：pending_approval → approve 后执行', a
   assert.ok(approvalId);
   assert.equal(mcpCalls.length, before); // 审批前不上游
 
-  const ra = await post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { body: {} });
+  const ra = await post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { token: approverKey, body: {} });
   assert.equal(ra.status, 200);
   const { execution } = await ra.json();
   assert.equal(execution.status, 'succeeded');
@@ -247,11 +253,33 @@ test('审批驳回 → rejected 且不执行', async () => {  const tool = await
     body: { action: 'echo', args: {} },
   });
   const approvalId = (await r.json()).error.details.approvalId;
-  const rr = await post(`/v1/projects/${project.id}/approvals/${approvalId}/reject`, { body: { reason: 'no need' } });
+  const rr = await post(`/v1/projects/${project.id}/approvals/${approvalId}/reject`, { token: approverKey, body: { reason: 'no need' } });
   assert.equal(rr.status, 200);
   const { execution } = await rr.json();
   assert.equal(execution.status, 'rejected');
   assert.equal(mcpCalls.length, before); // 驳回后不执行
+});
+
+test('职责分离：申请人自己审批 → 403（H-1 安全 review）', async () => {
+  const tool = await registerTool({ name: 't-sod', kind: 'mcp', endpoint: MCP_URL, riskLevel: 'high' });
+  const r = await post(`/v1/projects/${project.id}/tools/${tool.id}/invoke`, {
+    body: { action: 'echo', args: {} },
+  });
+  const approvalId = (await r.json()).error.details.approvalId;
+  // 发起人（adminKey 的 actor）自己点 approve → 403
+  const ra = await post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { body: {} });
+  assert.equal(ra.status, 403);
+  const err = await ra.json();
+  assert.match(err.error.message, /职责分离/);
+  // 换审批人批准 → 200，且审批单仍可用（自审批未消费）
+  const ra2 = await post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { token: approverKey, body: {} });
+  assert.equal(ra2.status, 200);
+});
+
+test('hashArgs 键序无关：语义相同键序不同 → 同一哈希（M-5）', async () => {
+  const { hashArgs } = await import('../src/modules/execution/service.mjs');
+  assert.equal(hashArgs({ a: 1, b: { x: 1, y: 2 } }), hashArgs({ b: { y: 2, x: 1 }, a: 1 }));
+  assert.notEqual(hashArgs({ a: 1 }), hashArgs({ a: 2 }));
 });
 
 test('审批并发：两个同时 approve 只有一个成功（防重复执行）', async () => {
@@ -261,8 +289,8 @@ test('审批并发：两个同时 approve 只有一个成功（防重复执行�
   });
   const approvalId = (await r.json()).error.details.approvalId;
   const [r1, r2] = await Promise.all([
-    post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { body: {} }),
-    post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { body: {} }),
+    post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { token: approverKey, body: {} }),
+    post(`/v1/projects/${project.id}/approvals/${approvalId}/approve`, { token: approverKey, body: {} }),
   ]);
   assert.deepEqual([r1.status, r2.status].sort(), [200, 409]);
   const ok = r1.status === 200 ? r1 : r2;
