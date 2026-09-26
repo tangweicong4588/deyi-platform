@@ -140,7 +140,7 @@ export async function listActions(tenantId, planId) {
 export async function updateAction(tenantId, id, patch) {
   const sets = [];
   const args = [];
-  for (const k of ['status', 'expected_effect', 'dryrun_reasons', 'preconditions', 'ontology_term_ids']) {
+  for (const k of ['status', 'expected_effect', 'dryrun_reasons', 'preconditions', 'ontology_term_ids', 'args']) {
     if (patch[k] !== undefined) {
       if (k === 'status' && !ACTION_STATUSES.has(patch[k])) throw new Error(`非法动作状态: ${patch[k]}`);
       sets.push(`${k}=?`);
@@ -153,4 +153,135 @@ export async function updateAction(tenantId, id, patch) {
   await db().query(`UPDATE business_actions SET ${sets.join(',')} WHERE id=? AND tenant_id=?`, args);
   const rows = await db().query('SELECT * FROM business_actions WHERE id=? AND tenant_id=?', [id, tenantId]);
   return normAction(rows[0]) || null;
+}
+
+/** 按 ID 取单个动作（租户隔离；V2.0-B 执行入口用） */
+export async function getAction(tenantId, id) {
+  assertId('bact', id);
+  const rows = await db().query('SELECT * FROM business_actions WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normAction(rows[0]) || null;
+}
+
+// ---------- 计划审批记录（V2.0-B：高风险动作执行的硬检查依据） ----------
+export async function recordPlanApproval({ tenantId, planId, approverId }) {
+  const now = nowMs();
+  const row = {
+    id: newId('bpar'), plan_id: planId, tenant_id: tenantId,
+    approver_id: approverId, decided_at: now, created_at: now,
+  };
+  // 同一计划重新审批时覆盖旧记录（UNIQUE(plan_id)）
+  await db().query(
+    `INSERT INTO plan_approvals(id,plan_id,tenant_id,approver_id,decided_at,created_at)
+     VALUES (?,?,?,?,?,?)
+     ON CONFLICT(plan_id) DO UPDATE SET approver_id=excluded.approver_id,
+       decided_at=excluded.decided_at, created_at=excluded.created_at, id=excluded.id`,
+    [row.id, row.plan_id, row.tenant_id, row.approver_id, row.decided_at, row.created_at]);
+  return row;
+}
+
+export async function getPlanApproval(tenantId, planId) {
+  const rows = await db().query(
+    'SELECT * FROM plan_approvals WHERE plan_id=? AND tenant_id=?', [planId, tenantId]);
+  return rows[0] || null;
+}
+
+// ---------- 短期授权（credential_grants） ----------
+const normGrant = (r) => r && { ...r, scope: J.parse(r.scope, {}) };
+
+export async function insertGrant({ tenantId, projectId, actionId, scope, expiresAt, createdBy }) {
+  const row = {
+    id: newId('grant'), tenant_id: tenantId, project_id: projectId, action_id: actionId,
+    scope: J.str(scope), expires_at: expiresAt, status: 'active', used_at: null,
+    created_by: createdBy || null, created_at: nowMs(),
+  };
+  await db().query(
+    `INSERT INTO credential_grants(id,tenant_id,project_id,action_id,scope,expires_at,status,used_at,created_by,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    [row.id, row.tenant_id, row.project_id, row.action_id, row.scope, row.expires_at,
+     row.status, row.used_at, row.created_by, row.created_at]);
+  return normGrant(row);
+}
+
+export async function getGrant(tenantId, id) {
+  assertId('grant', id);
+  const rows = await db().query('SELECT * FROM credential_grants WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normGrant(rows[0]) || null;
+}
+
+export async function setGrantStatus(tenantId, id, status) {
+  const now = nowMs();
+  await db().query(
+    `UPDATE credential_grants SET status=?, used_at=CASE WHEN ? IN ('used','revoked') THEN ? ELSE used_at END
+     WHERE id=? AND tenant_id=?`,
+    [status, status, now, id, tenantId]);
+  return getGrant(tenantId, id);
+}
+
+// ---------- 执行记录（action_executions） ----------
+const normExec = (r) => r && { ...r, result_summary: r.result_summary ?? '{}' };
+
+export async function getBusinessExecution(tenantId, id) {
+  assertId('bxn', id);
+  const rows = await db().query('SELECT * FROM action_executions WHERE id=? AND tenant_id=?', [id, tenantId]);
+  return normExec(rows[0]) || null;
+}
+
+export async function getBusinessExecutionByKey(tenantId, idempotencyKey) {
+  const rows = await db().query(
+    'SELECT * FROM action_executions WHERE tenant_id=? AND idempotency_key=?', [tenantId, idempotencyKey]);
+  return normExec(rows[0]) || null;
+}
+
+export async function insertBusinessExecution({ tenantId, projectId, actionId, grantId, idempotencyKey }) {
+  const row = {
+    id: newId('bxn'), tenant_id: tenantId, project_id: projectId, action_id: actionId,
+    grant_id: grantId || null, idempotency_key: idempotencyKey,
+    external_ref: null, result_summary: '{}', status: 'running',
+    started_at: nowMs(), finished_at: null, created_at: nowMs(),
+  };
+  await db().query(
+    `INSERT INTO action_executions(id,tenant_id,project_id,action_id,grant_id,idempotency_key,
+       external_ref,result_summary,status,started_at,finished_at,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [row.id, row.tenant_id, row.project_id, row.action_id, row.grant_id, row.idempotency_key,
+     row.external_ref, row.result_summary, row.status, row.started_at, row.finished_at, row.created_at]);
+  return normExec(row);
+}
+
+export async function updateBusinessExecution(tenantId, id, patch) {
+  const sets = [];
+  const args = [];
+  for (const k of ['external_ref', 'result_summary', 'status']) {
+    if (patch[k] !== undefined) { sets.push(`${k}=?`); args.push(patch[k]); }
+  }
+  if (!sets.length) return getBusinessExecution(tenantId, id);
+  sets.push('finished_at=CASE WHEN ? IN (\'succeeded\',\'failed\',\'compensated\') THEN ? ELSE finished_at END');
+  args.push(patch.status || '', nowMs());
+  await db().query(`UPDATE action_executions SET ${sets.join(',')} WHERE id=? AND tenant_id=?`,
+    [...args, id, tenantId]);
+  return getBusinessExecution(tenantId, id);
+}
+
+// ---------- 对账队列（reconciliation_items；V2.0-C 消费，本阶段只写入） ----------
+export async function insertReconciliation({ tenantId, projectId, actionId, executionId, reason }) {
+  const now = nowMs();
+  const row = {
+    id: newId('brec'), tenant_id: tenantId, project_id: projectId,
+    action_id: actionId || null, execution_id: executionId || null,
+    reason: String(reason || '').slice(0, 1000), status: 'open',
+    created_at: now, updated_at: now,
+  };
+  await db().query(
+    `INSERT INTO reconciliation_items(id,tenant_id,project_id,action_id,execution_id,reason,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+    [row.id, row.tenant_id, row.project_id, row.action_id, row.execution_id,
+     row.reason, row.status, row.created_at, row.updated_at]);
+  return row;
+}
+
+export async function listReconciliations(tenantId, { status = 'open' } = {}) {
+  const rows = await db().query(
+    'SELECT * FROM reconciliation_items WHERE tenant_id=? AND status=? ORDER BY created_at DESC LIMIT 200',
+    [tenantId, status]);
+  return rows;
 }

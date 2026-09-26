@@ -462,6 +462,9 @@ export async function approvePlan({ tenantId, projectId, planId, actorId }) {
     throw Errors.forbidden('审批人与意图创建人必须职责分离', { code: 'SOD_VIOLATION' });
   }
   await store.updatePlan(tenantId, planId, { status: 'approved' });
+  // V2.0-B：审批记录落库（审批人≠创建人已在上方校验），高风险动作执行时的硬检查依据，
+  // 也是 P6 执行审批自动放行的授权来源
+  await store.recordPlanApproval({ tenantId, planId, approverId: actorId });
   for (const a of await store.listActions(tenantId, planId)) {
     if (a.status === 'dryrun_ok') await store.updateAction(tenantId, a.id, { status: 'approved' });
   }

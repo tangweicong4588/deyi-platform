@@ -17,6 +17,7 @@ import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
 import * as plan from './plan.mjs';
 import * as store from './store.mjs';
+import * as execute from './execute.mjs';
 
 async function scopedProject(req, minRank, opName) {
   const c = ctx();
@@ -144,5 +145,34 @@ export function registerBusinessRoutes(app) {
       reason: (req.body || {}).reason,
     }));
     sendJson(res, 200, { data: out });
+  });
+
+  // ---- 执行（V2.0-B） ----
+  app.post(R('/business/actions/:actionId/execute'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'action.execute');
+    await policyCheck({ actor, tenantId, project, action: 'business.write', resource: { kind: 'business_action' } });
+    const body = req.body || {};
+    const out = await withTenant(tenantId, () => execute.executeAction({
+      tenantId, projectId: project.id, actionId: req.params.actionId, actorId: c.actorId,
+      grantId: body.grant_id || null,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  app.post(R('/business/plans/:planId/execute'), authenticate, async (req, res) => {
+    const { project, tenantId, actor, c } = await scopedProject(req, 1, 'plan.execute');
+    await policyCheck({ actor, tenantId, project, action: 'business.write', resource: { kind: 'business_plan' } });
+    const out = await withTenant(tenantId, () => execute.executePlan({
+      tenantId, projectId: project.id, planId: req.params.planId, actorId: c.actorId,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  app.get(R('/business/executions/:executionId'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'execution.get');
+    await policyCheck({ actor, tenantId, project, action: 'business.read', resource: { kind: 'business_execution' } });
+    const e = await store.getBusinessExecution(tenantId, req.params.executionId);
+    if (!e || e.project_id !== project.id) throw Errors.notFound('执行记录不存在');
+    sendJson(res, 200, { data: e });
   });
 }
