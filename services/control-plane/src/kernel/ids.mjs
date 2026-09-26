@@ -18,9 +18,10 @@ function rand(n) {
   return s;
 }
 
-/** 生成平台 ID，如 newId('ten') -> 'ten_3f9a...'（26 位随机） */
+/** 生成平台 ID，如 newId('ten') -> 'ten_3f9a...'（26 位随机）。
+ *  前缀 2–5 位小写字母（bplan_ 等 5 位前缀为 V2.0 业务域预留）。 */
 export function newId(prefix) {
-  if (!/^[a-z]{2,4}$/.test(prefix)) throw new Error(`非法 ID 前缀: ${prefix}`);
+  if (!/^[a-z]{2,5}$/.test(prefix)) throw new Error(`非法 ID 前缀: ${prefix}`);
   return `${prefix}_${rand(26)}`;
 }
 

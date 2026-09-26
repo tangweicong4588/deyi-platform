@@ -287,6 +287,52 @@ export async function embedInternal({ model: modelName = 'deyi-embedding', input
   return { vectors: (json.data || []).map((d) => d.embedding), usage, model: g.model };
 }
 
+/**
+ * chatInternal —— 内部 chat 调用（业务意图槽位抽取等模块使用）。
+ *
+ * 复用当前请求的 tenant/actor/trace 上下文，完整经过网关链路：
+ * 模型白名单 → 数据分级 → 策略决策 → 预算预检 → 上游 → 计量回写。
+ * 平台内禁止直连 chat provider，统一走这里。
+ * 调用方必须把失败当作"增强不可用"处理并回落，绝不因模型不可用整体失败。
+ *
+ * @returns { text, usage, model }
+ */
+export async function chatInternal({ model: modelName = 'deyi-default', messages, project = null, dataClass = 'internal', maxTokens = 512 }) {
+  if (!Array.isArray(messages) || !messages.length) throw Errors.badRequest('messages 必须是非空数组');
+  const g = await guardAndRoute(
+    { body: { model: modelName, messages }, headers: { 'x-deyi-data-class': dataClass } },
+    'chat', project);
+  const upstreamBody = {
+    model: g.model.litellm_model,
+    messages,
+    max_tokens: maxTokens,
+    user: g.c.actorId,
+    metadata: {
+      deyi_tenant_id: g.c.tenantId,
+      deyi_project_id: g.project?.id || null,
+      deyi_trace_id: g.c.traceId,
+    },
+  };
+  const t0 = nowMs();
+  const meta = {
+    tenantId: g.c.tenantId, project: g.project, actorId: g.c.actorId, traceId: g.c.traceId,
+    model: g.model, endpoint: 'chat.completions',
+  };
+  const { json, usedModel, engineTag } = await withSpan('gateway.model_call',
+    { 'model.name': g.model.name, 'gateway.endpoint': 'chat.completions' },
+    () => callWithFallback('/v1/chat/completions', upstreamBody, g.model, { traceId: g.c.traceId }))
+    .catch(async (e) => {
+      await persistUsage({ ...meta, usage: {}, latencyMs: nowMs() - t0, status: 'error' }).catch(() => {});
+      throw e;
+    });
+  const usage = json.usage || {};
+  await persistUsage({ ...meta, usage, latencyMs: nowMs() - t0, status: 'ok' });
+  logger.info('gateway chat(internal)', {
+    model: g.model.name, via: usedModel, engine: engineTag, tokens: usage.total_tokens || 0,
+  });
+  return { text: json.choices?.[0]?.message?.content || '', usage, model: g.model };
+}
+
 export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions', authenticate, handleChat);
   app.post('/v1/gw/embeddings', authenticate, handleEmbeddings);
 

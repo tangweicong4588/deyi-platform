@@ -130,6 +130,22 @@ deny_reason contains "交付域写入需要 operator 角色" if {
 	input.action == "delivery.write"; effective_rank(input.project.id) < 2
 }
 
+# R6b: 业务意图与计划 —— business.read 需 viewer+，business.write 需 operator+
+allow if {
+	input.action == "business.read"
+	effective_rank(input.project.id) >= 1
+}
+deny_reason contains "业务意图读取需要 viewer 角色" if {
+	input.action == "business.read"; effective_rank(input.project.id) < 1
+}
+allow if {
+	input.action == "business.write"
+	effective_rank(input.project.id) >= 2
+}
+deny_reason contains "业务意图写入需要 operator 角色" if {
+	input.action == "business.write"; effective_rank(input.project.id) < 2
+}
+
 reason := [r | some r in deny_reason][0] if { not allow } else := "default allow"
 
 result := {

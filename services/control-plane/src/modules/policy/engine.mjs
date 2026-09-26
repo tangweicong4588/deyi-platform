@@ -114,6 +114,18 @@ export function decideBuiltin(input) {
       : deny('交付域写入需要 operator 角色');
   }
 
+  // R6b: 业务意图与计划 —— business.read 需 viewer+，business.write 需 operator+
+  if (action === 'business.read') {
+    return rankOf(actor.roles, project?.id) >= 0
+      ? allow('业务意图读取（viewer+）')
+      : deny('业务意图读取需要 viewer 角色');
+  }
+  if (action === 'business.write') {
+    return rankOf(actor.roles, project?.id) >= 1
+      ? allow('业务意图写入（operator+）')
+      : deny('业务意图写入需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }

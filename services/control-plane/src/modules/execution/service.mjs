@@ -37,8 +37,9 @@ function assertTenantActor(actorId, what) {
   }
 }
 
-/** 疑似密钥的 key：按"词段"匹配（camelCase 先转 snake），避免 tokenizer 这类误伤 */
-function looksLikeSecretKey(k) {
+/** 疑似密钥的 key：按"词段"匹配（camelCase 先转 snake），避免 tokenizer 这类误伤。
+ *  业务域计划参数校验复用同一实现（rejectPlaintextSecrets 模式）。 */
+export function looksLikeSecretKey(k) {
   const norm = String(k).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
   return /(^|_)(secret|passwd|password|api_key|token|authorization|credentials?|private_key)($|_)/.test(norm);
 }

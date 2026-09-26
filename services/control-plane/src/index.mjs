@@ -16,6 +16,7 @@ import { registerOntologyRoutes } from './modules/ontology/routes.mjs';
 import { registerExecutionRoutes } from './modules/execution/routes.mjs';
 import { registerEvidenceRoutes } from './modules/evidence/routes.mjs';
 import { registerDeliveryRoutes } from './modules/delivery/routes.mjs';
+import { registerBusinessRoutes } from './modules/business/routes.mjs';
 import { initEvidence } from './modules/evidence/audit.mjs';
 import { tracingMiddleware, isTracingEnabled } from './kernel/tracing.mjs';
 import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
@@ -81,6 +82,7 @@ async function main() {
   registerExecutionRoutes(app);
   registerEvidenceRoutes(app);
   registerDeliveryRoutes(app);
+  registerBusinessRoutes(app);
 
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {
