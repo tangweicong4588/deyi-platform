@@ -7,8 +7,11 @@
  * - KEYCLOAK_URL 设了 → Keycloak OIDC：用 JWKS 验签，sub 映射到 actor.external_id。
  * - 否则 DEV_IDP_SECRET 设了 → 内置开发 IdP（HS256），**生产禁用**（config 已 fail-fast）。
  * - 两个都没设 → JWT 登录不可用（只剩 API Key）。
+ *
+ * 注意：Keycloak live 适配器尚未与真实 Keycloak 联调，JWKS/OIDC 交互合同基于
+ * OIDC 标准推断；生产上线前必须用真实 Keycloak 做端到端验证。
  */
-import { createHmac, createHash } from 'node:crypto';
+import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { config } from '../../kernel/config.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { logger } from '../../kernel/logging.mjs';
@@ -44,7 +47,8 @@ function devIdp() {
       const [h, p, sig] = parts;
       const want = createHmac('sha256', secret).update(`${h}.${p}`).digest('base64url');
       const a = Buffer.from(sig); const b = Buffer.from(want);
-      if (a.length !== b.length || !a.equals(b)) throw Errors.unauthorized('JWT 签名无效');
+      // 恒定时间比较（L-7 安全 review：原来用 a.equals(b)）
+      if (a.length !== b.length || !timingSafeEqual(a, b)) throw Errors.unauthorized('JWT 签名无效');
       let claims;
       try { claims = JSON.parse(b64urlDecode(p)); } catch { throw Errors.unauthorized('非法 JWT'); }
       if (claims.exp && claims.exp * 1000 < Date.now()) throw Errors.unauthorized('JWT 已过期');
@@ -59,13 +63,19 @@ const jwksCache = { at: 0, keys: [] };
 async function getKeycloakJwks() {
   if (Date.now() - jwksCache.at < 300_000 && jwksCache.keys.length) return jwksCache.keys;
   const url = `${config.KEYCLOAK_URL.replace(/\/$/, '')}/realms/${config.KEYCLOAK_REALM}/protocol/openid-connect/certs`;
-  const res = await fetch(url);
+  // M-3 安全 review：原来 fetch 无超时，Keycloak 挂起会导致认证请求无限挂起
+  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw Errors.upstream(`Keycloak JWKS 获取失败: ${res.status}`);
   const jwks = await res.json();
   jwksCache.at = Date.now();
   jwksCache.keys = jwks.keys || [];
   return jwksCache.keys;
 }
+
+// Keycloak JWT 签名算法白名单（拒绝 none / HS256 等算法混淆）
+const KC_ALLOWED_ALG = new Set(['RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'ES512']);
+// exp 时钟偏差容忍（秒）
+const CLOCK_SKEW_S = 30;
 
 function keycloakIdp() {
   return {
@@ -79,6 +89,7 @@ function keycloakIdp() {
         header = JSON.parse(b64urlDecode(hB64));
         claims = JSON.parse(b64urlDecode(pB64));
       } catch { throw Errors.unauthorized('非法 JWT'); }
+      if (!KC_ALLOWED_ALG.has(header.alg)) throw Errors.unauthorized('JWT 签名算法不在白名单');
       const keys = await getKeycloakJwks();
       const jwk = keys.find((k) => k.kid === header.kid) || keys[0];
       if (!jwk) throw Errors.unauthorized('Keycloak 公钥未找到');
@@ -87,9 +98,16 @@ function keycloakIdp() {
         .update(`${hB64}.${pB64}`)
         .verify(keyObj, Buffer.from(sigB64.replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
       if (!ok) throw Errors.unauthorized('JWT 签名无效');
-      if (claims.exp && claims.exp * 1000 < Date.now()) throw Errors.unauthorized('JWT 已过期');
+      const nowS = Math.floor(Date.now() / 1000);
+      if (claims.exp && claims.exp < nowS - CLOCK_SKEW_S) throw Errors.unauthorized('JWT 已过期');
+      if (claims.nbf && claims.nbf > nowS + CLOCK_SKEW_S) throw Errors.unauthorized('JWT 尚未生效');
+      // H-2 安全 review：原来 iss 缺失即放行、aud 完全不校验（受众混淆风险）
       const expectedIss = `${config.KEYCLOAK_URL.replace(/\/$/, '')}/realms/${config.KEYCLOAK_REALM}`;
-      if (claims.iss && claims.iss !== expectedIss) throw Errors.unauthorized('JWT 签发者不符');
+      if (claims.iss !== expectedIss) throw Errors.unauthorized('JWT 签发者不符');
+      if (config.KEYCLOAK_AUDIENCE) {
+        const auds = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+        if (!auds.includes(config.KEYCLOAK_AUDIENCE)) throw Errors.unauthorized('JWT 受众不符');
+      }
       return claims; // sub / preferred_username / email
     },
   };

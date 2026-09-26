@@ -7,6 +7,7 @@
 import { runWithContext, ctx } from '../../kernel/context.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { config } from '../../kernel/config.mjs';
+import { timingSafeEqual } from 'node:crypto';
 import { verifyApiKey } from './keys.mjs';
 import {
   getTenant, getActor, findActorByExternal, createActor,
@@ -62,7 +63,11 @@ export async function authenticate(req, res, next) {
   const token = m[1].trim();
 
   let resolved;
-  if (config.OPERATOR_TOKEN && token === config.OPERATOR_TOKEN) {
+  // L-3 安全 review：OPERATOR_TOKEN 用恒定时间比较（防时序侧信道）
+  const opToken = config.OPERATOR_TOKEN;
+  const isOperator = !!opToken && token.length === opToken.length &&
+    timingSafeEqual(Buffer.from(token), Buffer.from(opToken));
+  if (isOperator) {
     resolved = { authKind: 'operator', tenantId: null, actorId: 'operator', actorKind: 'service', projectId: null, roles: [] };
   } else if (token.startsWith('dyk_')) {
     resolved = await fromApiKey(token);

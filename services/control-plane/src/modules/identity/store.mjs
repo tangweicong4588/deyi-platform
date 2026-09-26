@@ -136,8 +136,8 @@ export async function revokeApiKey(tenantId, keyId) {
   if (!r.changes) throw Errors.notFound('API Key 不存在或已吊销');
 }
 
-export const touchKeyLastUsed = (keyId) =>
-  db().query('UPDATE api_keys SET last_used_at=? WHERE id=?', [nowMs(), keyId]);
+export const touchKeyLastUsed = (tenantId, keyId) =>
+  db().query('UPDATE api_keys SET last_used_at=? WHERE id=? AND tenant_id=?', [nowMs(), keyId, tenantId]);
 
 const ROLES = ['viewer', 'operator', 'admin'];
 

@@ -51,6 +51,8 @@ function adapterStatus() {
 
 async function main() {
   logger.info('control-plane starting', { env: config.DEYI_ENV, version: '0.5.0' });
+  // H-7 安全 review：生产启用 fake/fallback 适配器必须显式告警（config 已收集 prodWarnings）
+  for (const w of config.prodWarnings || []) logger.warn('生产 fake 适配器告警: ' + w);
   await openDb();
   await migrate(db());
   await initEvidence();

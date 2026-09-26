@@ -21,8 +21,14 @@ effective_rank(project_id) := max([r |
 } else := 0
 
 # R0: 停用租户/主体
+# M-4 安全 review：原来主体只判 `== "suspended"`，status 缺失时放行；
+# 统一为"缺失即拒绝"（fail-closed），与内置引擎一致。
 deny_reason contains "租户已停用" if { input.tenant.status != "active" }
-deny_reason contains "主体已停用" if { input.actor.status == "suspended" }
+deny_reason contains "主体已停用" if { input.actor.status != "active" }
+
+# 说明：项目级动作的规则引用 `input.project.id`；当 input.project 为 null 时
+# 该表达式取值失败→规则不成立→落到 `default allow := false`（拒绝），
+# 与内置引擎 `requireProject()` 的 fail-closed 语义一致。调用方必须传入项目。
 
 # R1: 管理面需租户级 admin
 allow if { startswith(input.action, "admin."); effective_rank(null) >= 3 }

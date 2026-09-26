@@ -60,7 +60,9 @@ export function registerIdentityRoutes(app) {
       const row = await createApiKeyRow({
         tenantId: req.params.tenantId, projectId, actorId, name, prefix, keyHash, scopes, expiresAt,
       });
-      ok(res, { ...row, key: secret }, 201); // key 只出现在这一次响应里
+      // L-1 安全 review：响应里剔除 key_hash（持有者不需要它，避免进日志/审计）
+      const { key_hash: _dropped, ...safeRow } = row;
+      ok(res, { ...safeRow, key: secret }, 201); // key 只出现在这一次响应里
     });
   app.get('/v1/admin/tenants/:tenantId/api-keys',
     authenticate, tenantScope, requireTenantRole('admin'), async (req, res) => {

@@ -38,8 +38,17 @@ export function decideBuiltin(input) {
     ({ allow: true, obligations, reason, policyVersion: POLICY_VERSION, engine: 'builtin' });
 
   // R0: 租户/主体停用 → 一律拒绝（纵深防御；认证层通常已拦截）
-  if (tenant.status && tenant.status !== 'active') return deny('租户已停用');
-  if (actor.status && actor.status !== 'active') return deny('主体已停用');
+  // M-4 安全 review：原来 `tenant.status && ...` 在 status 缺失时放行（fail-open），
+  // 与 Rego `!= "active"` 不一致；统一为"缺失即拒绝"（fail-closed）。
+  if (tenant.status !== 'active') return deny('租户已停用');
+  if (actor.status !== 'active') return deny('主体已停用');
+
+  // 项目级动作要求项目上下文：project 为 null 时拒绝（fail-closed），
+  // 与 Rego 侧 `input.project.id` 取值失败→规则不成立→默认拒绝语义一致。
+  const requireProject = () => {
+    if (!project) return deny('缺少项目上下文（fail-closed）');
+    return null;
+  };
 
   // R1: 管理面动作需要租户级 admin（路由层一般已做，这里兜底）
   if (action.startsWith('admin.')) {
@@ -61,7 +70,8 @@ export function decideBuiltin(input) {
       return { allow: true, obligations: [OBL_AUDIT, 'approval_required'], reason: '高风险工具调用需审批', policyVersion: POLICY_VERSION, engine: 'builtin' };
     }
     if (risk === 'medium') {
-      return rankOf(actor.roles, project?.id) >= 1 ? allow('中风险工具调用（operator+）') : deny('中风险工具调用需要 operator 角色');
+      const pj = requireProject(); if (pj) return pj;
+      return rankOf(actor.roles, project.id) >= 1 ? allow('中风险工具调用（operator+）') : deny('中风险工具调用需要 operator 角色');
     }
     return allow('低风险工具调用');
   }
@@ -76,52 +86,60 @@ export function decideBuiltin(input) {
 
   // R4b: 知识写入 —— 需要 operator+（项目级或租户级绑定）
   if (action === 'knowledge.ingest') {
-    return rankOf(actor.roles, project?.id) >= 1
+    const pj0 = requireProject(); if (pj0) return pj0;
+    return rankOf(actor.roles, project.id) >= 1
       ? allow('知识写入（operator+）')
       : deny('知识写入需要 operator 角色');
   }
 
   // R5: 本体发布 —— 必须走评审（obligation 由本体服务落实为"需评审通过"状态）
   if (action === 'ontology.publish') {
-    return rankOf(actor.roles, project?.id) >= 1
+    const pj1 = requireProject(); if (pj1) return pj1;
+    return rankOf(actor.roles, project.id) >= 1
       ? { allow: true, obligations: [OBL_AUDIT, 'review_required'], reason: '本体发布需评审', policyVersion: POLICY_VERSION, engine: 'builtin' }
       : deny('本体发布需要 operator 角色');
   }
 
   // R5b: 本体写入（提交候选/转评审/驳回/废止/冲突裁决）—— 需要 operator+
   if (action === 'ontology.write') {
-    return rankOf(actor.roles, project?.id) >= 1
+    const pj2 = requireProject(); if (pj2) return pj2;
+    return rankOf(actor.roles, project.id) >= 1
       ? allow('本体写入（operator+）')
       : deny('本体写入需要 operator 角色');
   }
 
   // R5c: 工具注册 —— 需要 operator+（项目级或租户级绑定）
   if (action === 'tool.register') {
-    return rankOf(actor.roles, project?.id) >= 1
+    const pj3 = requireProject(); if (pj3) return pj3;
+    return rankOf(actor.roles, project.id) >= 1
       ? allow('工具注册（operator+）')
       : deny('工具注册需要 operator 角色');
   }
 
   // R6: 交付域 —— delivery.read 需 viewer+，delivery.write 需 operator+
   if (action === 'delivery.read') {
-    return rankOf(actor.roles, project?.id) >= 0
+    const pj4 = requireProject(); if (pj4) return pj4;
+    return rankOf(actor.roles, project.id) >= 0
       ? allow('交付域读取（viewer+）')
       : deny('交付域读取需要 viewer 角色');
   }
   if (action === 'delivery.write') {
-    return rankOf(actor.roles, project?.id) >= 1
+    const pj5 = requireProject(); if (pj5) return pj5;
+    return rankOf(actor.roles, project.id) >= 1
       ? allow('交付域写入（operator+）')
       : deny('交付域写入需要 operator 角色');
   }
 
   // R6b: 业务意图与计划 —— business.read 需 viewer+，business.write 需 operator+
   if (action === 'business.read') {
-    return rankOf(actor.roles, project?.id) >= 0
+    const pj6 = requireProject(); if (pj6) return pj6;
+    return rankOf(actor.roles, project.id) >= 0
       ? allow('业务意图读取（viewer+）')
       : deny('业务意图读取需要 viewer 角色');
   }
   if (action === 'business.write') {
-    return rankOf(actor.roles, project?.id) >= 1
+    const pj7 = requireProject(); if (pj7) return pj7;
+    return rankOf(actor.roles, project.id) >= 1
       ? allow('业务意图写入（operator+）')
       : deny('业务意图写入需要 operator 角色');
   }

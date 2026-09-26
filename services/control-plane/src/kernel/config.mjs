@@ -19,6 +19,8 @@ const DEF = {
   OPERATOR_TOKEN: '',         // 平台运维 token（租户 CRUD）；生产由运维显式设置
   KEYCLOAK_URL: '',          // 设了就走 Keycloak OIDC
   KEYCLOAK_REALM: 'deyi',
+  KEYCLOAK_AUDIENCE: '',     // JWT aud 期望值（生产必填，防受众混淆）
+  API_KEY_PEPPER: '',        // API Key hash 的服务端 pepper（生产建议设置，轮换后旧 key 仍兼容校验）
   OPA_URL: '',               // 设了就走 OPA，否则用内置策略引擎
   LITELLM_URL: '',           // 设了模型调用就走 LiteLLM，否则直连 Provider（需显式允许）
   LITELLM_MASTER_KEY: '',      // 调用 LiteLLM 的内部 master key（不对外）
@@ -52,19 +54,31 @@ function load() {
 
   // ---- 启动校验（生产 fail-fast） ----
   const missing = [];
+  const prodWarnings = [];
   if (cfg.isProd) {
     if (!cfg.DATABASE_URL) missing.push('DATABASE_URL（生产必须 PostgreSQL）');
-    if (!cfg.DEV_IDP_SECRET && !cfg.KEYCLOAK_URL) missing.push('KEYCLOAK_URL（生产禁止内置 IdP）');
+    // 生产必须走 Keycloak，且禁止内置开发 IdP（H-1 安全 review：原来只设 DEV_IDP_SECRET 也能通过）
+    if (!cfg.KEYCLOAK_URL) missing.push('KEYCLOAK_URL（生产必须 Keycloak OIDC）');
+    if (cfg.DEV_IDP_SECRET) missing.push('DEV_IDP_SECRET（生产禁止内置 IdP）');
+    if (!cfg.KEYCLOAK_AUDIENCE) missing.push('KEYCLOAK_AUDIENCE（生产 JWT 受众校验必须配置）');
+    if (!cfg.OPERATOR_TOKEN) missing.push('OPERATOR_TOKEN（生产平台运维必须显式设置）');
     if (!cfg.LITELLM_URL && !cfg.allowDirectProvider) {
       missing.push('LITELLM_URL（生产模型出口必须走 LiteLLM，或显式 ALLOW_DIRECT_PROVIDER=true）');
     }
     if (!cfg.QDRANT_URL) missing.push('QDRANT_URL（生产向量索引必须走 Qdrant）');
     if (!cfg.AUDIT_ANCHOR_URL) missing.push('AUDIT_ANCHOR_URL（生产审计链必须外部锚定）');
     if (cfg.bootstrapEnabled) missing.push('BOOTSTRAP_ENABLED（生产禁止自动 bootstrap）');
+    if (!cfg.API_KEY_PEPPER) prodWarnings.push('API_KEY_PEPPER 未设置：API Key hash 缺少服务端 pepper 纵深（建议设置）');
+    // 生产 fake 适配器显式告警（H-7 安全 review）：缺失即静默回退 fake，必须让运维看见
+    if (!cfg.GITEA_URL) prodWarnings.push('GITEA_URL 未设置：仓库服务将使用 fake 适配器（simulated），生产请接入真 Gitea');
+    if (!cfg.TEMPORAL_ADDRESS) prodWarnings.push('TEMPORAL_ADDRESS 未设置：工作流将使用内置执行器，生产请接入 Temporal');
+    if (!cfg.DOCLING_URL) prodWarnings.push('DOCLING_URL 未设置：文档解析将使用内置解析器（能力降级），生产请接入 Docling');
+    if (cfg.RUNNER_MODE !== 'live') prodWarnings.push(`RUNNER_MODE=${cfg.RUNNER_MODE}：隔离 Runner 未启用 live 模式`);
   }
   if (missing.length) {
     throw new Error('生产配置校验失败，缺失：\n - ' + missing.join('\n - '));
   }
+  cfg.prodWarnings = Object.freeze(prodWarnings);
   return Object.freeze(cfg);
 }
 

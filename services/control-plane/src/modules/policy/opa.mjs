@@ -27,7 +27,15 @@ export async function decideViaOpa(input) {
     logger.error('opa error -> fail-closed deny', { status: res.status });
     return { allow: false, obligations: ['audit'], reason: `策略引擎错误 ${res.status}（fail-closed）`, policyVersion: 'opa/error', engine: 'opa' };
   }
-  const data = await res.json();
+  // M-5 安全 review：res.json() 原来在 try/catch 之外，畸形 body 会抛 raw Error
+  //（无审计 receipt）；现在解析失败也 fail-closed。
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    logger.error('opa bad body -> fail-closed deny', { err: String(e) });
+    return { allow: false, obligations: ['audit'], reason: '策略引擎响应解析失败（fail-closed）', policyVersion: 'opa/bad-body', engine: 'opa' };
+  }
   const r = data.result || {};
   return {
     allow: !!r.allow,

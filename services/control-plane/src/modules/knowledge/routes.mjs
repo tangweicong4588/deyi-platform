@@ -59,8 +59,11 @@ async function policyCheck({ actor, tenantId, project, c, action, resource }) {
   const receipt = await decide(inputFromRequest({
     actor,
     tenant: { id: tenantId, status: 'active' },
-    // Key 绑定了项目时，用绑定项目做跨项目判断；否则不带（读/写都在 URL 项目作用域内已鉴权）
-    project: c.projectId ? { id: c.projectId } : null,
+    // M-4 安全 review：原来 key 未绑定项目时传 project=null，导致与 Rego 语义分歧
+    //（内置引擎按租户级绑定放行，Rego 因取值失败而拒绝）。
+    // 读/写已在 URL 项目作用域内鉴权（scopedProject），这里直接传已解析的项目，
+    // 双边语义一致；key 绑定项目的跨项目约束仍由路由层 `c.projectId !== pid` 保证。
+    project: { id: project.id },
     action, resource: resource || {},
     context: {},
   }));
