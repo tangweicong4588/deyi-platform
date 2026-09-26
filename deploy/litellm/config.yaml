@@ -1,0 +1,31 @@
+# LiteLLM 配置（平台统一模型出口）
+#
+# 原则：
+# - Provider 的真实 key 只出现在这里（由运维注入环境变量），绝不进控制面代码。
+# - 控制面用 LITELLM_MASTER_KEY 调用 LiteLLM，再按租户做身份映射/预算/计量。
+# - model_list 由运维按"允许的模型供应商"维护；新增模型先灰度再进白名单。
+general_settings:
+  master_key: ${LITELLM_MASTER_KEY}
+  # 敏感提示默认不缓存（对应方案运行策略）
+  cache: false
+
+model_list:
+  # 示例：OpenAI 兼容入口。生产按实际供应商填写，
+  # key 全部走环境变量 os.environ/...
+  - model_name: deyi-default
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_base: ${DEFAULT_API_BASE:https://api.openai.com/v1}
+      api_key: os.environ/DEFAULT_API_KEY
+
+  # 示例一：自建 vLLM（私有化常用）
+  # - model_name: deyi-private-7b
+  #   litellm_params:
+  #     model: openai/qwen2-7b
+  #     api_base: http://vllm:8000/v1
+  #     api_key: os.environ/VLLM_API_KEY
+
+router_settings:
+  # 仅对幂等调用重试；总时间预算由控制面再包一层
+  num_retries: 2
+  retry_after: 2

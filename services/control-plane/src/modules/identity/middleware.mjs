@@ -1,0 +1,116 @@
+/**
+ * modules/identity/middleware.mjs —— 认证与鉴权中间件。
+ *
+ * 认证顺序：OPERATOR_TOKEN（平台运维）→ dyk_ API Key → JWT（Keycloak/开发 IdP）。
+ * 上下文 tenantId/actorId 只从凭证派生；requireRole 只认 role_bindings。
+ */
+import { runWithContext, ctx } from '../../kernel/context.mjs';
+import { Errors } from '../../kernel/errors.mjs';
+import { config } from '../../kernel/config.mjs';
+import { verifyApiKey } from './keys.mjs';
+import {
+  getTenant, getActor, findActorByExternal, createActor,
+  getRoleBindings, roleRank,
+} from './store.mjs';
+import { getIdP } from './idp.mjs';
+import { logger } from '../../kernel/logging.mjs';
+
+async function fromApiKey(secret) {
+  const { key, tenant, actor } = await verifyApiKey(secret, { getTenant, getActor });
+  const bindings = await getRoleBindings(tenant.id, actor.id);
+  return {
+    authKind: 'api_key', tenantId: tenant.id, actorId: actor.id, actorKind: actor.kind,
+    projectId: key.project_id || null, roles: bindings,
+  };
+}
+
+async function fromJwt(token) {
+  const idp = getIdP();
+  if (!idp) throw Errors.unauthorized('JWT 登录未配置');
+  const claims = await idp.verifyJwt(token);
+  // 租户：优先 claims 里的 tenant_id，回退按 slug 找（Keycloak 场景由运维映射）
+  let tenant = null;
+  if (claims.tenant_id) tenant = await getTenant(claims.tenant_id).catch(() => null);
+  if (!tenant) throw Errors.unauthorized('JWT 未绑定有效租户');
+  if (tenant.status !== 'active') throw Errors.unauthorized('租户已停用');
+  // 主体：优先 actor_id，回退 external_id(sub)，都没有则自动开通（无角色，需管理员授权）
+  let actor = null;
+  if (claims.actor_id) actor = await getActor(tenant.id, claims.actor_id).catch(() => null);
+  if (!actor && claims.sub) actor = await findActorByExternal(tenant.id, String(claims.sub));
+  if (!actor && claims.sub) {
+    actor = await createActor(tenant.id, {
+      kind: 'user',
+      name: claims.name || claims.preferred_username || 'sso-user',
+      email: claims.email || null,
+      externalId: String(claims.sub),
+    });
+    logger.info('identity: sso auto-provision', { tenant: tenant.slug, sub: claims.sub });
+  }
+  if (!actor || actor.status !== 'active') throw Errors.unauthorized('主体无效');
+  const bindings = await getRoleBindings(tenant.id, actor.id);
+  return {
+    authKind: 'jwt', tenantId: tenant.id, actorId: actor.id, actorKind: actor.kind,
+    projectId: null, roles: bindings,
+  };
+}
+
+/** 认证中间件：解析出身份并重建请求上下文（不抛 500，失败即 401） */
+export async function authenticate(req, res, next) {
+  const header = req.headers['authorization'] || '';
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  if (!m) throw Errors.unauthorized('缺少 Authorization: Bearer');
+  const token = m[1].trim();
+
+  let resolved;
+  if (config.OPERATOR_TOKEN && token === config.OPERATOR_TOKEN) {
+    resolved = { authKind: 'operator', tenantId: null, actorId: 'operator', actorKind: 'service', projectId: null, roles: [] };
+  } else if (token.startsWith('dyk_')) {
+    resolved = await fromApiKey(token);
+  } else {
+    resolved = await fromJwt(token);
+  }
+  const traceId = ctx().traceId;
+  await runWithContext({ traceId, ...resolved }, () => next());
+}
+
+/** 平台运维（OPERATOR_TOKEN） */
+export async function requireOperator(req, res, next) {
+  if (ctx().authKind !== 'operator') throw Errors.forbidden('需要平台运维权限');
+  await next();
+}
+
+/** 计算在某项目下的有效角色等级（取租户级与项目级的最大值） */
+export function effectiveRank(bindings, projectId = null) {
+  let rank = -1;
+  for (const b of bindings) {
+    if (b.project_id === null || (projectId && b.project_id === projectId)) {
+      rank = Math.max(rank, roleRank(b.role));
+    }
+  }
+  return rank;
+}
+
+/** 要求租户级最低角色（admin 路由用） */
+export function requireTenantRole(minRole) {
+  const min = roleRank(minRole);
+  return async (req, res, next) => {
+    const c = ctx();
+    if (c.authKind === 'operator') return next();
+    if (!c.tenantId) throw Errors.unauthorized();
+    if (effectiveRank(c.roles, null) < min) throw Errors.forbidden(`需要租户级 ${minRole} 角色`);
+    await next();
+  };
+}
+
+/**
+ * 租户隔离守卫：路由含 :tenantId 时，operator 放行，其余必须与自身租户一致。
+ * 放到 authenticate 之后、业务 handler 之前。
+ */
+export async function tenantScope(req, res, next) {
+  const c = ctx();
+  const tid = req.params?.tenantId;
+  if (tid && c.authKind !== 'operator' && c.tenantId !== tid) {
+    throw Errors.forbidden('跨租户访问被拒绝');
+  }
+  await next();
+}

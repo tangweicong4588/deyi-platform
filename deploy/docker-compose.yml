@@ -1,0 +1,132 @@
+# 得逸智行平台 V0.5 —— 完整 OSS 基线（生产形态）
+#
+# 自研控制面（control-plane）+ 开源执行底座，全部通过适配层对接。
+# 注意：本文件未在提交者本机验证（无 Docker），首次部署前请在目标环境执行
+#   docker compose up --build
+# 并按 docs/deployment.md 做健康检查。
+#
+# 必设环境（写入 .env 或 export）：
+#   POSTGRES_PASSWORD=      # 强密码
+#   KEYCLOAK_ADMIN_PASSWORD=# 强密码
+#   LITELLM_MASTER_KEY=     # 内部 master key（仅 control-plane 与 litellm 之间）
+#   OPERATOR_TOKEN=         # 平台运维 token（强随机）
+#   DEYI_ENV=production
+
+name: deyi-platform
+
+services:
+  # ---------- 真相源 ----------
+  postgres:
+    image: postgres:16.4
+    environment:
+      POSTGRES_USER: deyi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置}
+      POSTGRES_DB: deyi
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deyi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------- 向量索引（派生，可重建） ----------
+  qdrant:
+    image: qdrant/qdrant:v1.11.0
+    volumes:
+      - qdrantdata:/qdrant/storage
+    ports:
+      - "6333:6333"
+
+  # ---------- 身份（认证源；授权归平台） ----------
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.6
+    command: start
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/deyi
+      KC_DB_USERNAME: deyi
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?必须设置}
+      KC_HOSTNAME_STRICT: "false"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?必须设置}
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------- 模型统一出口 ----------
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.52.0
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?必须设置}
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "4000:4000"
+
+  # ---------- 策略决策引擎 ----------
+  opa:
+    image: openpolicyagent/opa:0.68.0
+    command: ["run", "--server", "--addr", "0.0.0.0:8181", "/policy"]
+    volumes:
+      - ./opa/policy:/policy:ro
+    ports:
+      - "8181:8181"
+
+  # ---------- 文档解析 ----------
+  docling:
+    image: quay.io/docling-project/docling-serve:v0.7.0
+    ports:
+      - "5001:5001"
+
+  # ---------- 长流程工作流 ----------
+  temporal:
+    image: temporalio/auto-setup:1.24.0
+    environment:
+      DB: postgresql
+      DB_PORT: "5432"
+      POSTGRES_USER: deyi
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?必须设置}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+    ports:
+      - "7233:7233"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------- 自研控制面 ----------
+  control-plane:
+    build: ../services/control-plane
+    environment:
+      DEYI_ENV: ${DEYI_ENV:-production}
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      DATABASE_URL: postgres://deyi:${POSTGRES_PASSWORD:?必须设置}@postgres:5432/deyi
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:?必须设置}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: deyi
+      OPA_URL: http://opa:8181
+      LITELLM_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?必须设置}
+      QDRANT_URL: http://qdrant:6333
+      DOCLING_URL: http://docling:5001
+      TEMPORAL_ADDRESS: temporal:7233
+      AUDIT_ANCHOR_URL: ${AUDIT_ANCHOR_URL:-}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  qdrantdata:
