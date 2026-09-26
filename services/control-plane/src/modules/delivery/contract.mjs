@@ -52,6 +52,8 @@ export async function evaluateContract({ tenantId, projectId, changePackageId, a
     items.push({ key, status, evidence: evidence ?? null, message, waived_by: null });
 
   // ---- contract.ac：全部 AC passed/waived（无 AC 视为未就绪，沿用 V1.0-A 语义） ----
+  // batch3 遗留修复：除包级汇总项外，逐项输出未通过的 ac:<id>，门禁例外优先用
+  // 逐项申请（整包豁免 contract.ac 需显式 broadWaiver 确认，见 requestGateException）
   const req = await store.getRequirement(tenantId, chg.requirement_id).catch(() => null);
   const acs = req ? await store.listACs(tenantId, req.id) : [];
   const acOk = req ? await store.allACsAccepted(tenantId, req.id) : false;
@@ -60,6 +62,13 @@ export async function evaluateContract({ tenantId, projectId, changePackageId, a
     acOk ? `全部 ${acs.length} 个验收标准已通过/豁免`
           : (req ? `存在未通过的验收标准（${acs.filter((a) => !['passed', 'waived'].includes(a.status)).length} 项待处理）`
                  : '关联需求不存在'));
+  if (!acOk && req) {
+    for (const a of acs.filter((x) => !['passed', 'waived'].includes(x.status))) {
+      push(`ac:${a.id}`, 'fail',
+        { requirement_id: req.id, ac_status: a.status },
+        `验收标准未通过（当前状态=${a.status}），可逐项申请豁免`);
+    }
+  }
 
   // ---- contract.steps.*：各 step 最近一次已完成运行必须 passed ----
   for (const step of ['build', 'test', 'scan']) {

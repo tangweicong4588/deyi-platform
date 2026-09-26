@@ -20,7 +20,10 @@ const DEF = {
   KEYCLOAK_URL: '',          // 设了就走 Keycloak OIDC
   KEYCLOAK_REALM: 'deyi',
   KEYCLOAK_AUDIENCE: '',     // JWT aud 期望值（生产必填，防受众混淆）
-  API_KEY_PEPPER: '',        // API Key hash 的服务端 pepper（生产建议设置，轮换后旧 key 仍兼容校验）
+  API_KEY_PEPPER: '',        // API Key hash 的服务端 pepper（生产建议设置）
+  // 轮换方法：新 pepper → API_KEY_PEPPER；旧 pepper 移入 _PREVIOUS（逗号分隔），
+  // 旧 key 在过渡期内仍可校验；确认全部轮换/过期后再从 _PREVIOUS 移除
+  API_KEY_PEPPER_PREVIOUS: '',
   OPA_URL: '',               // 设了就走 OPA，否则用内置策略引擎
   LITELLM_URL: '',           // 设了模型调用就走 LiteLLM，否则直连 Provider（需显式允许）
   LITELLM_MASTER_KEY: '',      // 调用 LiteLLM 的内部 master key（不对外）

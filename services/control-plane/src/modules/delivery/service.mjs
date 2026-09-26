@@ -161,7 +161,7 @@ export async function transitionAC(tenantId, projectId, requirementId, acId, to,
     const ok = await hasApprovedACWaiver(tenantId, projectId, requirementId, acId);
     if (!ok) {
       throw Errors.badRequest(
-        'AC 豁免需要先申请并获批门禁例外（missing_items 须含 contract.ac 或 ac:<id>）',
+        'AC 豁免需要先申请并获批门禁例外：逐项用 ac:<id> 申请；整包豁免（contract.ac）需在例外申请时显式 broadWaiver=true 确认',
         { code: 'WAIVER_APPROVAL_REQUIRED' });
     }
   }
@@ -176,16 +176,19 @@ export async function transitionAC(tenantId, projectId, requirementId, acId, to,
   return out;
 }
 
-/** M-2：AC 关联变更包的流水线运行上是否存在已批准的豁免例外 */
+/** M-2：AC 关联变更包的流水线运行上是否存在已批准的豁免例外。
+ * 优先逐项 ac:<id>；包级 contract.ac 仅当例外单显式 broad_waiver 确认时有效
+ *（batch3 遗留修复：防审批人在不知情下放行整包豁免）。 */
 async function hasApprovedACWaiver(tenantId, projectId, requirementId, acId) {
-  const keys = new Set(['contract.ac', `ac:${acId}`]);
   const chgs = await store.listChangePackages(tenantId, projectId, { requirementId }).catch(() => []);
   for (const chg of chgs) {
     const runs = await store.listPipelineRuns(tenantId, projectId, { changePackageId: chg.id }).catch(() => []);
     for (const r of runs) {
       const approved = await store.listGateExceptions(tenantId, r.id, { status: 'approved' }).catch(() => []);
       for (const g of approved) {
-        if ((g.missing_items || []).some((m) => keys.has(m))) return true;
+        const items = g.missing_items || [];
+        if (items.includes(`ac:${acId}`)) return true;
+        if (items.includes('contract.ac') && g.broad_waiver) return true;
       }
     }
   }

@@ -79,3 +79,49 @@ test('停用租户一律拒绝', async () => {
   });
   assert.equal(r.allow, false);
 });
+
+/* ============ batch1 遗留：OPA 故障 fail-closed ============ */
+test('OPA 畸形 body → fail-closed 拒绝（不抛 raw Error）', async () => {
+  const { createServer } = await import('node:http');
+  const { decideViaOpa } = await import('../src/modules/policy/opa.mjs');
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('this is not json {{{'); // 畸形 body
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const receipt = await decideViaOpa({ action: 'x' }, url);
+    assert.equal(receipt.allow, false, '畸形 body 必须拒绝');
+    assert.equal(receipt.engine, 'opa');
+    assert.ok(receipt.obligations.includes('audit'), '拒绝必须带审计义务');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('OPA 不可达 → fail-closed 拒绝', async () => {
+  const { decideViaOpa } = await import('../src/modules/policy/opa.mjs');
+  const receipt = await decideViaOpa({ action: 'x' }, 'http://127.0.0.1:1'); // 不可达端口
+  assert.equal(receipt.allow, false);
+  assert.equal(receipt.policyVersion, 'opa/unreachable');
+});
+
+test('OPA 正常 allow → 放行并透出 obligations', async () => {
+  const { createServer } = await import('node:http');
+  const { decideViaOpa } = await import('../src/modules/policy/opa.mjs');
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ result: { allow: true, obligations: ['audit', 'approval_required'], reason: 'ok', policy_version: 'v1' } }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const receipt = await decideViaOpa({ action: 'x' }, url);
+    assert.equal(receipt.allow, true);
+    assert.ok(receipt.obligations.includes('approval_required'));
+    assert.equal(receipt.engine, 'opa');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});

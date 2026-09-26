@@ -7,7 +7,7 @@ import { Errors } from '../../kernel/errors.mjs';
 import { db } from '../../db/index.mjs';
 
 export const INTENT_STATUSES = new Set(['draft', 'planned', 'approved', 'executing', 'done', 'rejected', 'cancelled']);
-export const PLAN_STATUSES = new Set(['draft', 'dryrun_passed', 'dryrun_blocked', 'approved', 'rejected']);
+export const PLAN_STATUSES = new Set(['draft', 'dryrun_passed', 'dryrun_blocked', 'approved', 'executing', 'rejected']);
 export const ACTION_STATUSES = new Set(['pending', 'dryrun_ok', 'dryrun_blocked', 'approved', 'executing', 'done', 'failed', 'compensated']);
 
 const J = {
@@ -111,6 +111,33 @@ export async function updatePlan(tenantId, id, patch) {
   return getPlan(tenantId, id);
 }
 
+/**
+ * batch4 遗留修复：计划执行认领 CAS（approved/dryrun_passed → executing）。
+ * 返回 true=本次认领成功；false=已被并发认领或状态已变（调用方应拒绝重复执行）。
+ */
+export async function claimPlanForExecution(tenantId, id) {
+  const upd = await db().run(
+    `UPDATE business_plans SET status='executing', updated_at=?
+     WHERE id=? AND tenant_id=? AND status IN ('approved','dryrun_passed')`,
+    [nowMs(), id, tenantId]);
+  return upd.changes === 1;
+}
+
+/**
+ * 释放执行认领（executing → 执行前状态），成功/失败路径都要走，保证锁不泄漏。
+ * 失败后回到原状态可修复重试；成功后回到原状态则是幂等重放（动作级幂等键防重复副作用）。
+ */
+export async function releasePlanExecution(tenantId, id, restoreStatus = 'approved') {
+  if (!['approved', 'dryrun_passed'].includes(restoreStatus)) {
+    throw new Error(`非法的计划恢复状态: ${restoreStatus}`);
+  }
+  await db().run(
+    `UPDATE business_plans SET status=?, updated_at=?
+     WHERE id=? AND tenant_id=? AND status='executing'`,
+    [restoreStatus, nowMs(), id, tenantId]);
+  return getPlan(tenantId, id);
+}
+
 // ---------- 动作 ----------
 export async function createAction({ tenantId, projectId, planId, seq, toolRef, toolName, args,
   idempotencyKey, ontologyTermIds = [], preconditions = [], expectedEffect = {} }) {
@@ -189,6 +216,31 @@ export async function countActionExecutions(tenantId, actionId) {
   return Number(rows[0]?.n || 0);
 }
 
+/**
+ * batch4 遗留修复：resetPlan 的多动作重置 + 意图状态回退在同一事务内完成。
+ * 中途任一动作状态不符（并发已修改）即整体回滚，不产生部分重置。
+ * @param resets [{ actionId, newKey }]（newKey 由调用方按 countActionExecutions 预生成）
+ */
+export async function resetPlanAtomic({ tenantId, intentId, resets }) {
+  return db().transaction(async (tx) => {
+    for (const r of resets) {
+      const upd = await tx.run(
+        `UPDATE business_actions SET status='approved', idempotency_key=?, updated_at=?
+         WHERE id=? AND tenant_id=? AND status IN ('failed','compensated','executing')`,
+        [r.newKey, nowMs(), r.actionId, tenantId]);
+      if (upd.changes === 0) {
+        throw Errors.conflict(
+          `动作 ${r.actionId} 当前状态不允许重置（可能已被并发修改）`,
+          { code: 'INVALID_ACTION_STATE' });
+      }
+    }
+    await tx.run(
+      `UPDATE business_intents SET status='approved', updated_at=? WHERE id=? AND tenant_id=?`,
+      [nowMs(), intentId, tenantId]);
+    return resets.map((r) => r.actionId);
+  });
+}
+
 // ---------- 计划审批记录（V2.0-B：高风险动作执行的硬检查依据） ----------
 export async function recordPlanApproval({ tenantId, planId, approverId }) {
   const now = nowMs();
@@ -246,12 +298,16 @@ export async function setGrantStatus(tenantId, id, status) {
 
 /**
  * 原子消费 grant：active→used 的 CAS（L-5 安全 / M1 数据 review）。
+ * batch4 遗留修复：CAS 条件补 expires_at > now——过期 grant 即使 status 仍为 active
+ * 也不能被消费（validateGrant 是读时检查，消费时必须再做一次原子检查，防 TOCTOU）。
  * 返回 true=本次消费成功；false=已被消费/过期/吊销（调用方应视为并发冲突，拒绝重复执行）。
  */
 export async function consumeGrant(tenantId, id) {
+  const now = nowMs();
   const upd = await db().run(
-    `UPDATE credential_grants SET status='used', used_at=? WHERE id=? AND tenant_id=? AND status='active'`,
-    [nowMs(), id, tenantId]);
+    `UPDATE credential_grants SET status='used', used_at=?
+     WHERE id=? AND tenant_id=? AND status='active' AND expires_at > ?`,
+    [now, id, tenantId, now]);
   return upd.changes === 1;
 }
 
@@ -372,7 +428,7 @@ export async function listAllReconciliations(tenantId, { source = null, limit = 
   return listReconciliations(tenantId, { status: null, source, limit });
 }
 
-export async function updateReconciliation(tenantId, id, patch) {
+export async function updateReconciliation(tenantId, id, patch, expectedStatus) {
   const sets = [];
   const args = [];
   for (const k of ['status', 'assignee', 'resolution', 'decided_at', 'closed_at']) {
@@ -385,6 +441,13 @@ export async function updateReconciliation(tenantId, id, patch) {
   if (!sets.length) return getReconciliation(tenantId, id);
   sets.push('updated_at=?');
   args.push(nowMs(), id, tenantId);
-  await db().query(`UPDATE reconciliation_items SET ${sets.join(',')} WHERE id=? AND tenant_id=?`, args);
+  // batch4 遗留修复：旧状态 CAS——并发推进时只有一个能成功，防状态覆盖
+  let sql = `UPDATE reconciliation_items SET ${sets.join(',')} WHERE id=? AND tenant_id=?`;
+  if (expectedStatus !== undefined) {
+    sql += ' AND status=?';
+    args.push(expectedStatus);
+  }
+  const upd = await db().run(sql, args);
+  if (expectedStatus !== undefined && upd.changes === 0) return null;
   return getReconciliation(tenantId, id);
 }

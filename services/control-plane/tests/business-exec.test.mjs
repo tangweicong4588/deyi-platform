@@ -587,3 +587,95 @@ test('M-13 read-back 同步重试有总时长熔断默认值', async () => {
   assert.equal(verify.__internal.totalTimeoutMs(), 120000);
   assert.ok(verify.__internal.attempts() >= 1 && verify.__internal.attempts() <= 10);
 });
+
+// ---------- batch4 遗留修复：并发缺口回归 ----------
+
+test('R4-1 grant 消费 CAS 检查有效期：过期但仍 active 的 grant 消费失败', async () => {
+  const { action } = await readyPlan('采购网线，金额50元');
+  const { grant } = await execMod.issueGrant({
+    tenantId: tenant.id, projectId: project.id, actionId: action.id, actorId: opActor.id,
+  });
+  // 模拟 TOCTOU：校验通过后、消费前过期（status 仍为 active）
+  await db().query('UPDATE credential_grants SET expires_at=? WHERE id=?', [Date.now() - 1, grant.id]);
+  const ok = await bizStore.consumeGrant(tenant.id, grant.id);
+  assert.equal(ok, false, '过期 grant 即使 status=active 也不能被消费');
+  const g = await bizStore.getGrant(tenant.id, grant.id);
+  assert.equal(g.status, 'active', '消费失败不应改变 grant 状态');
+});
+
+test('R4-2 计划执行认领 CAS：并发认领只有一个成功，释放后可再认领', async () => {
+  const { planId } = await readyPlan('采购插线板，金额120元', { approve: true });
+  assert.equal(await bizStore.claimPlanForExecution(tenant.id, planId), true);
+  assert.equal(await bizStore.claimPlanForExecution(tenant.id, planId), false, '已认领的计划不能重复认领');
+  assert.equal((await bizStore.getPlan(tenant.id, planId)).status, 'executing');
+  // 非 executing 状态的释放是空操作（CAS 条件不命中）
+  await bizStore.releasePlanExecution(tenant.id, planId, 'approved');
+  assert.equal((await bizStore.getPlan(tenant.id, planId)).status, 'approved');
+  assert.equal(await bizStore.claimPlanForExecution(tenant.id, planId), true, '释放后可重新认领');
+  await bizStore.releasePlanExecution(tenant.id, planId, 'approved');
+});
+
+test('R4-3 执行中的计划拒绝重复执行（HTTP 409），释放后可正常执行', async () => {
+  const { planId } = await readyPlan('采购硬盘，金额600元', { approve: true });
+  // 模拟计划正被另一副本执行
+  assert.equal(await bizStore.claimPlanForExecution(tenant.id, planId), true);
+  const r = await post(`${B(project.id)}/plans/${planId}/execute`, opSecret, {});
+  assert.equal(r.status, 409);
+  assert.equal(codeOf(r.json), 'PLAN_EXECUTION_CONFLICT');
+  // 释放后可正常执行；执行结束认领锁回到执行前状态
+  await bizStore.releasePlanExecution(tenant.id, planId, 'approved');
+  const r2 = await post(`${B(project.id)}/plans/${planId}/execute`, opSecret, {});
+  assert.equal(r2.status, 200);
+  assert.equal((await bizStore.getPlan(tenant.id, planId)).status, 'approved');
+});
+
+test('R4-4 对账旧状态 CAS：过期期望状态的更新被拒，不覆盖', async () => {
+  const rec = await bizStore.insertReconciliation({
+    tenantId: tenant.id, projectId: project.id, actionId: null, executionId: null,
+    reason: 'CAS 测试', source: 'execute',
+  });
+  const ok = await bizStore.updateReconciliation(tenant.id, rec.id, { status: 'investigating' }, 'open');
+  assert.ok(ok && ok.status === 'investigating');
+  // 用过期期望状态更新 → null（调用方应转 409）
+  const stale = await bizStore.updateReconciliation(
+    tenant.id, rec.id, { status: 'escalated', assignee: 'someone' }, 'open');
+  assert.equal(stale, null, '旧状态 CAS 未命中应返回 null');
+  assert.equal((await bizStore.getReconciliation(tenant.id, rec.id)).status, 'investigating', '并发写入不得覆盖');
+});
+
+test('R4-5 resetPlanAtomic：中途失败整体回滚，无部分重置', async () => {
+  const { planId, actions } = await readyPlan('采购投影仪，金额3000元', { approve: true });
+  assert.ok(actions.length >= 1);
+  await db().query(`UPDATE business_actions SET status='failed' WHERE plan_id=?`, [planId]);
+  const resets = actions.map((a, i) => ({ actionId: a.id, newKey: `k${i}_${Date.now()}` }));
+  resets.push({ actionId: 'bact_xxxxxxxxxxxxxxxxxxxxxxxxxx', newKey: 'kbogus' }); // 伪造 → 触发回滚
+  await assert.rejects(
+    () => bizStore.resetPlanAtomic({ tenantId: tenant.id, intentId: 'bint_bogus', resets }),
+    /不允许重置|已被并发修改/);
+  for (const a of actions) {
+    assert.equal((await bizStore.getAction(tenant.id, a.id)).status, 'failed', '回滚后动作仍为 failed（无部分重置）');
+  }
+});
+
+test('R6 复核：executePlan 早退/异常不让计划卡死在 executing（认领必释放）', async () => {
+  // 场景1：计划无动作 → NO_ACTIONS，认领释放回 approved
+  const intent1 = await bizStore.createIntent({ tenantId: tenant.id, projectId: project.id, rawText: '空计划', createdBy: opActor.id });
+  const p1 = await bizStore.createPlan({ tenantId: tenant.id, projectId: project.id, intentId: intent1.id, createdBy: opActor.id });
+  await bizStore.updatePlan(tenant.id, p1.id, { status: 'approved' });
+  const r1 = await post(`${B(project.id)}/plans/${p1.id}/execute`, opSecret, {});
+  assert.equal(r1.status, 400, '无动作计划应拒绝执行');
+  assert.equal((await bizStore.getPlan(tenant.id, p1.id)).status, 'approved', '认领必须释放回执行前状态');
+
+  // 场景2：计划含 dryrun_blocked 动作 → 拒绝执行，认领释放
+  const intent2 = await bizStore.createIntent({ tenantId: tenant.id, projectId: project.id, rawText: '阻断计划', createdBy: opActor.id });
+  const p2 = await bizStore.createPlan({ tenantId: tenant.id, projectId: project.id, intentId: intent2.id, createdBy: opActor.id });
+  await bizStore.updatePlan(tenant.id, p2.id, { status: 'approved' });
+  const a2 = await bizStore.createAction({
+    tenantId: tenant.id, projectId: project.id, planId: p2.id, seq: 1,
+    toolName: 't', args: {}, idempotencyKey: 'idem-blocked-1',
+  });
+  await bizStore.updateAction(tenant.id, a2.id, { status: 'dryrun_blocked' });
+  const r2 = await post(`${B(project.id)}/plans/${p2.id}/execute`, opSecret, {});
+  assert.equal(r2.status, 403, '含阻断动作的计划应拒绝执行');
+  assert.equal((await bizStore.getPlan(tenant.id, p2.id)).status, 'approved', '认领必须释放回执行前状态');
+});

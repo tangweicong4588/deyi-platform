@@ -191,7 +191,7 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
   if (action.status === 'dryrun_blocked' || plan.status === 'dryrun_blocked') {
     throw Errors.forbidden('动作未通过 dry-run，绝不允许执行', { code: 'DRYRUN_BLOCKED' });
   }
-  if (!['dryrun_passed', 'approved'].includes(plan.status)) {
+  if (!['dryrun_passed', 'approved', 'executing'].includes(plan.status)) {
     throw Errors.conflict(`计划状态 ${plan.status} 不允许执行`, { code: 'INVALID_PLAN_STATE' });
   }
   if (!['dryrun_ok', 'approved', 'executing', 'done'].includes(action.status)) {
@@ -254,6 +254,16 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
   await store.updateAction(tenantId, action.id, { status: 'executing' });
   const c = ctx();
 
+  // ---- batch4 遗留修复：grant 在外部副作用之前原子消费 ----
+  // active→used + 未过期 CAS 一次完成。消费失败=已被并发消费/撤销/过期→拒绝执行，
+  // 绝不触碰外部工具。注意：消费后若执行异常，grant 已燃烧（动作失败，不可重试），
+  // 这是有意为之——grant 是"一次性执行权"，不是"重试券"。
+  if (!(await store.consumeGrant(tenantId, grant.id))) {
+    await store.updateBusinessExecution(tenantId, bxn.id, { result_summary: '{}', status: 'failed' });
+    await store.updateAction(tenantId, action.id, { status: 'failed' });
+    throw Errors.conflict('授权已被消费、撤销或过期，拒绝执行', { code: 'GRANT_CONSUMED' });
+  }
+
   // ---- 经 P6 工具链路执行 ----
   // 高风险工具的 P6 审批由业务审批自动放行；放行失败与执行异常走统一失败处理
   let inv;
@@ -273,11 +283,11 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
       throw e;
     });
   } catch (e) {
-    // 执行异常（策略拒绝/引擎失败/审批放行失败等）：落库失败 + 对账 + 消费 grant，再抛给上层
+    // 执行异常（策略拒绝/引擎失败/审批放行失败等）：落库失败 + 对账，再抛给上层。
+    // grant 已在副作用前原子消费，这里不再重复消费（重复消费会静默失败，但语义上 grant
+    // 在 invokeTool 之前就已燃烧）。
     await store.updateBusinessExecution(tenantId, bxn.id, { result_summary: '{}', status: 'failed' });
     await store.updateAction(tenantId, action.id, { status: 'failed' });
-    // L-5/M1：grant 消费走原子 CAS（active→used），防并发重复消费
-    await store.consumeGrant(tenantId, grant.id);
     await store.insertReconciliation({
       tenantId, projectId, actionId: action.id, executionId: bxn.id,
       reason: `动作执行异常: ${scrubText(e.message).slice(0, 500)}`,
@@ -300,9 +310,7 @@ export async function executeAction({ tenantId, projectId, actionId, actorId, gr
     external_ref: externalRef, result_summary: summary, status: finalStatus,
   });
   await store.updateAction(tenantId, action.id, { status: actionStatus });
-  if (!(await store.consumeGrant(tenantId, grant.id))) {
-    logger.warn('business grant already consumed at finish', { grant: grant.id, action: action.id });
-  }
+  // grant 已在副作用前原子消费（active→used + 未过期 CAS），成功路径无需再次消费。
   if (finalStatus === 'failed') {
     // P6 引擎内补偿已尝试仍失败（或无补偿）：进对账队列，人工处理
     await store.insertReconciliation({
@@ -346,8 +354,13 @@ async function compensateBusinessAction({ tenantId, projectId, action, actorId, 
   const tool = tools.find((t) => t.name === name && t.status === 'active');
   if (!tool) return fail('compensation-tool-unavailable', `补偿工具 ${name} 未注册或已停用`);
   // M-9 业务 review：补偿原来直调 executeOne，完全绕过 grant/审批/幂等。
-  // 现在：签发一次性内部 grant（持有人=回滚发起人，TTL 5 分钟，scope 绑定补偿工具+参数），
-  // 用 CAS done→compensated 认领（并发重复补偿只认领一次 → 幂等），执行后立即消费 grant。
+  // batch4 遗留修复——统一补偿授权合同（诚实版）：
+  // 补偿 grant 不是"审批"，而是"单次执行凭证"：它证明此次补偿由回滚发起人（actorId）
+  // 发起、scope 绑定补偿工具+参数哈希、TTL 5 分钟、一次性。真正的授权链是：
+  // (1) 调用方必须在已授权的 executePlan 回滚路径内（compensateBusinessAction 不对外暴露）；
+  // (2) 补偿工具必须在动作创建时声明于 expected_effect.compensation_tool；
+  // (3) CAS done→compensated 认领防重复补偿；
+  // (4) 执行前校验 grant 仍有效（active/未过期/持有人一致/scope 一致），任一不符即拒绝执行。
   const grant = await store.insertGrant({
     tenantId, projectId, actionId: action.id,
     scope: { tool_id: tool.id, tool_action: BUSINESS_TOOL_ACTION, args_hash: hashArgs(action.args) },
@@ -364,6 +377,28 @@ async function compensateBusinessAction({ tenantId, projectId, action, actorId, 
     logger.info('business compensation deduplicated', { action: action.id });
     return { compensated: true, deduplicated: true };
   }
+  // 执行前校验补偿凭证：grant 必须仍 active、未过期、持有人为回滚发起人、scope 与签发时一致
+  const cg = await store.getGrant(tenantId, grant.id);
+  const cgScope = cg?.scope || {};
+  if (!cg || cg.status !== 'active' || cg.expires_at <= nowMs()
+      || cg.granted_to !== actorId
+      || cgScope.tool_id !== tool.id || cgScope.args_hash !== hashArgs(action.args)) {
+    await store.setGrantStatus(tenantId, grant.id, 'revoked').catch(() => {});
+    await db().run(
+      `UPDATE business_actions SET status='done', updated_at=? WHERE id=? AND tenant_id=? AND status='compensated'`,
+      [nowMs(), action.id, tenantId]);
+    return fail('compensation-grant-invalid', '补偿凭证校验失败（状态/过期/持有人/scope 不符），拒绝执行');
+  }
+  // R6 复核修复：补偿凭证必须在外部副作用前原子消费。原实现先 executeOne 后 consume，
+  // 若进程在两者之间崩溃/consume 失败，grant 仍为 active 可被重放。consume 是 CAS
+  //（active→used，含过期检查），失败说明 grant 已被并发消费/过期/吊销→回滚补偿认领并拒绝执行。
+  if (!(await store.consumeGrant(tenantId, grant.id))) {
+    await store.setGrantStatus(tenantId, grant.id, 'revoked').catch(() => {});
+    await db().run(
+      `UPDATE business_actions SET status='done', updated_at=? WHERE id=? AND tenant_id=? AND status='compensated'`,
+      [nowMs(), action.id, tenantId]);
+    return fail('compensation-grant-consumed', '补偿凭证消费失败（并发消费/过期/吊销），拒绝执行补偿');
+  }
   try {
     // 补偿走本地同步执行（与 P6 runCompensations 同哲学）：可预期、不嵌套审批；
     // 密钥走 vault_ref，args 已脱敏校验
@@ -371,7 +406,6 @@ async function compensateBusinessAction({ tenantId, projectId, action, actorId, 
       tool, action: BUSINESS_TOOL_ACTION, args: action.args,
       timeoutMs: Number(config.MCP_TIMEOUT_MS) || 30000,
     });
-    await store.consumeGrant(tenantId, grant.id);
     await tryAudit({
       tenantId, projectId, actorId, traceId: c.traceId,
       action: 'business.action.compensate', resourceKind: 'business_action', resourceId: action.id,
@@ -380,8 +414,8 @@ async function compensateBusinessAction({ tenantId, projectId, action, actorId, 
     logger.info('business plan rollback compensated', { action: action.id, tool: name });
     return { compensated: true };
   } catch (e) {
-    // 补偿本身失败：状态回滚为 done（允许后续重试补偿），如实进对账，不静默
-    await store.consumeGrant(tenantId, grant.id);
+    // 补偿本身失败：grant 已在副作用前消费（不可重放）；动作状态回滚为 done
+    //（允许后续重试补偿——重试会签发新 grant），如实进对账，不静默
     await db().run(
       `UPDATE business_actions SET status='done', updated_at=? WHERE id=? AND tenant_id=? AND status='compensated'`,
       [nowMs(), action.id, tenantId]);
@@ -401,11 +435,25 @@ export async function executePlan({ tenantId, projectId, planId, actorId }) {
   if (plan.status === 'dryrun_blocked') {
     throw Errors.forbidden('计划未通过 dry-run，绝不允许执行', { code: 'DRYRUN_BLOCKED' });
   }
-  if (!['dryrun_passed', 'approved'].includes(plan.status)) {
+  // dryrun_blocked/draft/rejected 等直接拒绝；executing 放行给 CAS 认领处理
+  //（返回 PLAN_EXECUTION_CONFLICT 而非 INVALID_PLAN_STATE，语义更准确）
+  if (!['dryrun_passed', 'approved', 'executing'].includes(plan.status)) {
     throw Errors.conflict(`计划状态 ${plan.status} 不允许执行`, { code: 'INVALID_PLAN_STATE' });
   }
+  const preStatus = plan.status; // 释放认领时恢复
+  // batch4 遗留修复：计划级执行认领 CAS（approved/dryrun_passed → executing）。
+  // 两个并发 executePlan 只有一个能认领成功，另一个直接 409，防重复执行整计划。
+  if (!(await store.claimPlanForExecution(tenantId, plan.id))) {
+    throw Errors.conflict('计划正被并发执行或状态已变更，拒绝重复执行', { code: 'PLAN_EXECUTION_CONFLICT' });
+  }
+  // R6 复核修复：try 必须紧跟认领成功——认领之后、原 try 之前的 listActions /
+  // setIntentStatus 若抛异常，计划会卡死在 executing（原缺口）。finally 释放是幂等的
+  //（releasePlanExecution 只在 status='executing' 时生效），早退路径无需重复释放。
+  try {
   const actions = await store.listActions(tenantId, planId);
-  if (!actions.length) throw Errors.badRequest('计划没有可执行动作', { code: 'NO_ACTIONS' });
+  if (!actions.length) {
+    throw Errors.badRequest('计划没有可执行动作', { code: 'NO_ACTIONS' });
+  }
   // 纵深：即使计划状态异常，dryrun_blocked 的动作也绝不执行
   const blocked = actions.filter((a) => a.status === 'dryrun_blocked');
   if (blocked.length) {
@@ -418,7 +466,9 @@ export async function executePlan({ tenantId, projectId, planId, actorId }) {
   const results = [];
   const succeeded = [];
   let failedAction = null;
+  const compensations = [];
 
+  // 认领释放必须走 finally：任何异常都不能让计划卡死在 executing
   for (const a of actions) {
     try {
       const r = await executeAction({ tenantId, projectId, actionId: a.id, actorId });
@@ -444,7 +494,6 @@ export async function executePlan({ tenantId, projectId, planId, actorId }) {
     }
   }
 
-  const compensations = [];
   if (failedAction) {
     // 任一失败 → 停止后续 → 已成功动作逆序补偿
     for (const s of [...succeeded].reverse()) {
@@ -454,7 +503,8 @@ export async function executePlan({ tenantId, projectId, planId, actorId }) {
       });
       compensations.push({ action_id: s.id, ...cr });
     }
-    // 回到"已批准"：可修复后重试（意图状态机无 failed，approved 即待处理）
+    // 回到执行前状态：可修复后重试（意图状态机无 failed，approved 即待处理）
+    // 计划认领锁由外层 finally 统一释放
     await store.setIntentStatus(tenantId, plan.intent_id, 'approved');
     await tryAudit({
       tenantId, projectId, actorId, traceId: c.traceId,
@@ -462,6 +512,11 @@ export async function executePlan({ tenantId, projectId, planId, actorId }) {
       payload: { failed_action_id: failedAction.id, compensated: compensations.filter((x) => x.compensated).length },
     });
   } else {
+    // 成功：意图 done（履约完成）。计划回到执行前状态（approved/dryrun_passed）——这是有意设计：
+    // 计划状态描述的是"蓝图生命周期"（草案→dry-run→批准），意图状态描述的是"履约生命周期"
+    //（待处理→执行中→done）。计划执行过与否，看意图 done + 动作全 done + 审计事件
+    // business.plan.execute.done；动作级幂等键保证重放不重复副作用。
+    // 计划认领锁由外层 finally 统一释放。
     await store.setIntentStatus(tenantId, plan.intent_id, 'done');
     await tryAudit({
       tenantId, projectId, actorId, traceId: c.traceId,
@@ -469,10 +524,14 @@ export async function executePlan({ tenantId, projectId, planId, actorId }) {
       payload: { actions: results.length },
     });
   }
-  return {
-    plan: await store.getPlan(tenantId, planId),
-    results,
-    failed_action_id: failedAction?.id || null,
-    compensations,
-  };
+    return {
+      plan: await store.getPlan(tenantId, planId),
+      results,
+      failed_action_id: failedAction?.id || null,
+      compensations,
+    };
+  } finally {
+    // 认领锁必须释放：成功/失败/异常都回到执行前状态
+    await store.releasePlanExecution(tenantId, plan.id, preStatus);
+  }
 }

@@ -16,8 +16,8 @@
  * simulated（fake）基线拒绝复现：fake 不能证明 DoD。
  */
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { Errors } from '../../kernel/errors.mjs';
 import { nowMs } from '../../kernel/ids.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
@@ -131,15 +131,21 @@ export async function runStep({ tenantId, projectId, changePackageId, actorId,
       const relPath = a && a.path;
       if (!kind || !relPath) throw Errors.badRequest('artifacts 元素必须含 kind 与 path');
       const abs = resolveInWorkspace(wsDir, String(relPath), 'artifacts[].path');
-      let st;
-      try { st = statSync(abs); } catch {
+      // batch5 遗留修复：symlink 后验。statSync 跟随链接，词法检查会被
+      // "工作区内链接 → jail 外文件" 绕过；必须 realpath 后再验一次 jail。
+      let realAbs;
+      try {
+        realAbs = realpathSync(abs);
+      } catch {
         throw Errors.badRequest(`产物文件不存在: ${relPath}`, { code: 'ARTIFACT_NOT_FOUND' });
       }
+      resolveInWorkspace(wsDir, relative(wsDir, realAbs) || '.', 'artifacts[].path');
+      const st = statSync(realAbs); // 已是解析后真实路径，无跟随歧义
       if (!st.isFile()) throw Errors.badRequest(`产物不是文件: ${relPath}`, { code: 'ARTIFACT_NOT_FILE' });
       if (st.size > MAX_ARTIFACT_BYTES) {
         throw Errors.badRequest(`产物过大（>${MAX_ARTIFACT_BYTES} 字节）: ${relPath}`, { code: 'ARTIFACT_TOO_LARGE' });
       }
-      const contentHash = sha256File(abs);
+      const contentHash = sha256File(realAbs);
       // content_hash 校验沿用 V1.0-A（registerArtifact 校验 kind/hash 格式）
       const art = await dsvc.registerArtifact(tenantId, projectId, changePackageId, {
         kind, contentHash, uri: `runner_run:${run.id}:${relPath}`,
@@ -150,12 +156,25 @@ export async function runStep({ tenantId, projectId, changePackageId, actorId,
     // ---- scan 报告解析（p23 门禁语义：critical/high>0 即阻断，fail-closed） ----
     if (step === 'scan' && reportFile) {
       const abs = resolveInWorkspace(wsDir, String(reportFile), 'reportFile');
+      // batch5 遗留修复：reportFile 同产物一样做 symlink 后验——扫描报告是门禁
+      // 可信输入，工作区内链接指向 jail 外文件必须直接拒绝，不能读进来解析。
+      let realRep;
       try {
-        const parsed = JSON.parse(readFileSync(abs, 'utf8'));
-        scanSeverities = extractSeverities(parsed);
-        if (!scanSeverities) scanNote = '报告无可识别的 severity 汇总，按 exit code 判定';
-      } catch (e) {
-        scanNote = `报告不可读（${String((e && e.message) || e).slice(0, 120)}），fail-closed 阻断`;
+        realRep = realpathSync(abs);
+      } catch {
+        realRep = null;
+      }
+      if (!realRep) {
+        scanNote = '报告不可读（文件不存在），fail-closed 阻断';
+      } else {
+        resolveInWorkspace(wsDir, relative(wsDir, realRep) || '.', 'reportFile');
+        try {
+          const parsed = JSON.parse(readFileSync(realRep, 'utf8'));
+          scanSeverities = extractSeverities(parsed);
+          if (!scanSeverities) scanNote = '报告无可识别的 severity 汇总，按 exit code 判定';
+        } catch (e) {
+          scanNote = `报告不可读（${String((e && e.message) || e).slice(0, 120)}），fail-closed 阻断`;
+        }
       }
     }
   } catch (e) {
@@ -319,11 +338,13 @@ export async function reproduce({ tenantId, projectId, changePackageId, actorId 
         workdir: wsDir, commands: base.commands, env: base.env || {},
         limits: base.limits || {}, mode: 'live',
       });
-      // 关键产物 hash（按基线 artifacts_json 的 path 逐一重算）
+      // 关键产物 hash（按基线 artifacts_json 的 path 逐一重算；symlink 后验同产物收集）
       for (const a of base.artifacts || []) {
         try {
           const abs = resolveInWorkspace(wsDir, String(a.path), 'artifact path');
-          repHashes[a.path] = sha256File(abs);
+          const realAbs = realpathSync(abs);
+          resolveInWorkspace(wsDir, relative(wsDir, realAbs) || '.', 'artifact path');
+          repHashes[a.path] = sha256File(realAbs);
         } catch {
           repHashes[a.path] = null; // 产物缺失 → 不一致
         }

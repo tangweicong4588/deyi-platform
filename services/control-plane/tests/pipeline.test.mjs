@@ -19,7 +19,7 @@ const { createApp } = await import('../src/kernel/http.mjs');
 const { registerIdentityRoutes } = await import('../src/modules/identity/routes.mjs');
 const { registerDeliveryRoutes } = await import('../src/modules/delivery/routes.mjs');
 
-let tenant, project, adminSecret, viewerSecret, otherSecret;
+let tenant, project, adminSecret, admin2Secret, viewerSecret, otherSecret;
 before(async () => {
   await openDb();
   await migrate(db());
@@ -32,6 +32,13 @@ before(async () => {
   const ak = mintKey();
   await store.createApiKeyRow({ tenantId: tenant.id, actorId: admin.id, name: 'pipe-admin', prefix: ak.prefix, keyHash: ak.keyHash });
   adminSecret = ak.secret;
+
+  // batch3 遗留修复（SoD 测试用）：第二个审批人，申请人不能批准自己的例外
+  const admin2 = await store.createActor(tenant.id, { kind: 'user', name: 'PIPE Admin2' });
+  await store.bindRole(tenant.id, admin2.id, null, 'admin');
+  const ak2 = mintKey();
+  await store.createApiKeyRow({ tenantId: tenant.id, actorId: admin2.id, name: 'pipe-admin2', prefix: ak2.prefix, keyHash: ak2.keyHash });
+  admin2Secret = ak2.secret;
 
   const viewer = await store.createActor(tenant.id, { kind: 'user', name: 'PIPE Viewer' });
   await store.bindRole(tenant.id, viewer.id, project.id, 'viewer');
@@ -190,7 +197,7 @@ test('门禁例外审批：申请→批准→放行（waived_by 落盘）', asyn
   assert.equal(q.status, 201);
   const gex = (await q.json()).data;
   assert.equal(gex.status, 'pending');
-  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '风险可接受' });
+  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '风险可接受' }, admin2Secret);
   assert.equal(d.status, 200);
   assert.equal((await d.json()).data.status, 'approved');
   const adv = await advance(facts.id);
@@ -229,7 +236,8 @@ test('例外驳回后：再次推进仍被阻断（200 blocked，不静默通过
   await advance(facts.id);
   const q = await post(`${P()}/pipeline-runs/${facts.id}/gate-exceptions`, { reason: '试试' });
   const gex = (await q.json()).data;
-  await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: false, reason: '证据不足' });
+  // 驳回也需职责分离：由另一审批人决议
+  await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: false, reason: '证据不足' }, admin2Secret);
   const adv = await advance(facts.id);
   assert.equal(adv.status, 200);
   const out = (await adv.json()).data;
@@ -353,13 +361,15 @@ test('全链路：develop 缺产物阻断 → 补齐通过；handover 通过 →
   assert.ok(hMissing.includes('contract.ac'), '合同未通过应进入缺失清单');
   assert.ok(hMissing.some((m) => String(m).startsWith('contract.steps.')));
   // 例外审批覆盖全部合同缺失项 → 批准 → 再次推进放行
+  // （含 contract.ac 整包豁免，需 broadWaiver 显式确认；审批人须与申请人分离）
   const q = await post(`${P()}/pipeline-runs/${hoRun.run_id}/gate-exceptions`, {
     missingItems: hMissing.filter((m) => String(m).startsWith('contract.')),
     reason: '测试环境豁免合同证据',
+    broadWaiver: true,
   });
   assert.equal(q.status, 201);
   const gex = (await q.json()).data;
-  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '测试豁免' });
+  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '测试豁免' }, admin2Secret);
   assert.equal(d.status, 200);
   const hAdv = await advance(hoRun.run_id);
   assert.equal(hAdv.status, 200);
@@ -397,13 +407,19 @@ test('AC 豁免需已批准的门禁例外（M-2）：无审批 400，有审批�
   const w1 = await patch(`${P()}/requirements/${reqId}/acceptance-criteria/${acId}`, { status: 'waived' });
   assert.equal(w1.status, 400);
   assert.equal((await w1.json()).error.details.code, 'WAIVER_APPROVAL_REQUIRED');
-  // 为 contract.ac 申请例外 → 批准 → 豁免放行
+  // 为 contract.ac 申请例外（整包豁免需 broadWaiver 显式确认）→ 批准 → 豁免放行
+  const q0 = await post(`${P()}/pipeline-runs/${hoRun.run_id}/gate-exceptions`, {
+    missingItems: ['contract.ac'], reason: '未确认整包豁免',
+  });
+  assert.equal(q0.status, 400);
+  assert.equal((await q0.json()).error.details.code, 'BROAD_WAIVER_CONFIRM_REQUIRED');
   const q = await post(`${P()}/pipeline-runs/${hoRun.run_id}/gate-exceptions`, {
-    missingItems: ['contract.ac'], reason: '该 AC 不适用本次变更',
+    missingItems: ['contract.ac'], reason: '该 AC 不适用本次变更', broadWaiver: true,
   });
   assert.equal(q.status, 201);
   const gex = (await q.json()).data;
-  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '同意豁免' });
+  assert.equal(gex.broad_waiver, true);
+  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '同意豁免' }, admin2Secret);
   assert.equal(d.status, 200);
   const w2 = await patch(`${P()}/requirements/${reqId}/acceptance-criteria/${acId}`, { status: 'waived' });
   assert.equal(w2.status, 200);
@@ -516,4 +532,57 @@ test('例外决议鉴权：viewer 不能决议例外审批', async () => {
   const gex = (await q.json()).data;
   const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true }, viewerSecret);
   assert.equal(d.status, 403);
+});
+
+test('SoD：申请人不能批准自己的门禁例外 → 403', async () => {
+  const { chg } = await mkPackage('SoD 测试');
+  const { runs } = await startPipe(chg.id);
+  const facts = runOf(runs, 'facts');
+  await advance(facts.id);
+  const q = await post(`${P()}/pipeline-runs/${facts.id}/gate-exceptions`, { reason: '自批试试' });
+  assert.equal(q.status, 201);
+  const gex = (await q.json()).data;
+  // 同一 actor（申请人=admin）决议 → 403 SOD_VIOLATION
+  const d = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '自己批自己' });
+  assert.equal(d.status, 403);
+  assert.equal((await d.json()).error.details.code, 'SOD_VIOLATION');
+  // 另一审批人可正常决议
+  const d2 = await post(`${P()}/gate-exceptions/${gex.id}/decide`, { approved: true, reason: '他人批准' }, admin2Secret);
+  assert.equal(d2.status, 200);
+});
+
+test('AC 逐项豁免：ac:<id> 无需 broadWaiver，批准后可 waive 单项', async () => {
+  const { reqId, chgId, clfRunId } = await toClarifyStage('逐项豁免测试');
+  const ac = await post(`${P()}/requirements/${reqId}/acceptance-criteria`, { thenMd: '逐项豁免', kind: 'manual' });
+  const acId = (await ac.json()).data.id;
+  await advance(clfRunId);
+  let view = await (await get(`${P()}/change-packages/${chgId}/pipeline`)).json();
+  const devRun = view.data.stages.find((s) => s.stage === 'develop');
+  await patch(`${P()}/change-packages/${chgId}`, { status: 'building', headCommit: 'def5678' });
+  for (const kind of ['diff', 'test_report', 'scan_report']) {
+    await post(`${P()}/change-packages/${chgId}/artifacts`, { kind, contentHash: HASH });
+  }
+  await advance(devRun.run_id);
+  await post(`${P()}/change-packages/${chgId}/artifacts`, { kind: 'report', contentHash: HASH });
+  await patch(`${P()}/change-packages/${chgId}`, { status: 'verifying' });
+  view = await (await get(`${P()}/change-packages/${chgId}/pipeline`)).json();
+  const hoRun = view.data.stages.find((s) => s.stage === 'handover');
+  const blocked = await advance(hoRun.run_id);
+  const missing = (await blocked.json()).data.missing;
+  // 缺失清单同时含包级 contract.ac 与逐项 ac:<id>
+  assert.ok(missing.includes('contract.ac'));
+  assert.ok(missing.includes(`ac:${acId}`), '逐项 ac:<id> 应进入缺失清单');
+  // 逐项申请：无需 broadWaiver
+  const q = await post(`${P()}/pipeline-runs/${hoRun.run_id}/gate-exceptions`, {
+    missingItems: [`ac:${acId}`], reason: '仅豁免该单项',
+  });
+  assert.equal(q.status, 201);
+  const gexBody = (await q.json()).data;
+  assert.equal(gexBody.broad_waiver, false);
+  const gexId = gexBody.id;
+  const d = await post(`${P()}/gate-exceptions/${gexId}/decide`, { approved: true, reason: '同意逐项豁免' }, admin2Secret);
+  assert.equal(d.status, 200);
+  const w = await patch(`${P()}/requirements/${reqId}/acceptance-criteria/${acId}`, { status: 'waived' });
+  assert.equal(w.status, 200);
+  assert.equal((await w.json()).data.status, 'waived');
 });

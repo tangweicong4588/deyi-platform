@@ -9,8 +9,12 @@ export function isOpaEnabled() {
   return !!config.OPA_URL;
 }
 
-export async function decideViaOpa(input) {
-  const url = `${config.OPA_URL.replace(/\/$/, '')}/v1/data/deyi/authz`;
+/**
+ * OPA 决策。opaUrl 参数仅测试用（注入 fake OPA 地址）；生产调用方不传，走 config.OPA_URL。
+ * OPA 不可用 / 报错 / 畸形 body 一律 fail-closed 拒绝（不抛 raw Error，保证审计 receipt）。
+ */
+export async function decideViaOpa(input, opaUrl = config.OPA_URL) {
+  const url = `${String(opaUrl).replace(/\/$/, '')}/v1/data/deyi/authz`;
   let res;
   try {
     res = await fetch(url, {

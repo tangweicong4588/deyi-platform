@@ -166,7 +166,14 @@ function assertCommand(cmd, root, index) {
     // L-8：cwd 若是 symlink，解析后再验一次 jail（词法 resolve 会被链接带到 jail 外）
     const realCwd = realpathSync(workCwd);
     workCwd = resolveInWorkspace(root, relative(root, realCwd) || '.', `commands[${index}].cwd`);
-  } catch { /* 不存在则 exec 时自然 ENOENT；词法检查已做 */ }
+  } catch (e) {
+    // batch5 遗留修复：只吞"不存在"（ENOENT：目录可能由命令自身创建，exec 时自然报错；词法检查已做）。
+    // PATH_ESCAPE 必须向上传——否则 symlink 指向 jail 外会被静默接受，exec 时 cwd
+    // 落到 jail 外，相对路径读写全部逃逸。其他异常（ELOOP/EACCES/ENOTDIR）同样向上传，
+    // 不在预检阶段把问题藏到 exec 时。
+    if (e?.details?.code === 'PATH_ESCAPE') throw e;
+    if (e?.code !== 'ENOENT') throw e;
+  }
   let bin = argv[0];
   if (bin.includes('/') || bin.includes('\\')) {
     // 含路径分隔符：只允许 jail 内相对路径（如 ./gradlew）；jail 外绝对路径拒绝，
@@ -190,6 +197,22 @@ function assertCommand(cmd, root, index) {
       accessSync(bin, constants.X_OK);
     } catch {
       throw Errors.badRequest(`commands[${index}].argv[0] 不可执行: ${argv[0]}`, { code: 'NOT_EXECUTABLE' });
+    }
+  }
+  // batch5 遗留修复：argv 明文凭据直接拒绝（与 env 的 PLAINTEXT_SECRET 同铁律）。
+  // commands_json 会原样落库（reproduce 需原样重放），--token xxx / --token=xxx
+  // 这类明文一旦进库就随备份/从库扩散；凭据必须走 env 的 vault 引用。
+  for (let i = 0; i < argv.length; i++) {
+    const a = String(argv[i]);
+    const eqm = a.match(SECRET_FLAG_EQ_RE);
+    if (eqm && !VAULT_REF_RE.test(a.slice(eqm[1].length + 1))) {
+      throw Errors.badRequest(
+        `commands[${index}].argv[${i}] 疑似明文凭据，禁止传入；请用 vault 引用（vault:<name>）或环境变量`, { code: 'PLAINTEXT_SECRET' });
+    }
+    if (SECRET_FLAG_RE.test(a) && i + 1 < argv.length && !String(argv[i + 1]).startsWith('-')
+        && !VAULT_REF_RE.test(String(argv[i + 1]))) {
+      throw Errors.badRequest(
+        `commands[${index}].argv[${i + 1}] 疑似明文凭据，禁止传入；请用 vault 引用（vault:<name>）或环境变量`, { code: 'PLAINTEXT_SECRET' });
     }
   }
   // 不含 '/' 的短名：执行时走沙箱 PATH 查找（execFile 自带 PATH 查找），此处不预解析

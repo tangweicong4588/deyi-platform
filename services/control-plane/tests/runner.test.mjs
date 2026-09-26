@@ -551,17 +551,25 @@ test('R5 argv 密钥两种形式都被脱敏（L-9）', async () => {
   assert.deepEqual(
     isolated.scrubArgv(['node', 'x.mjs', '--token', 'sekritABC', '--api-key=sekritDEF', '--other', 'keep']),
     ['node', 'x.mjs', '--token', '***', '--api-key=***', '--other', 'keep']);
-  // 日志回显不带明文
+  // 日志回显不带明文。batch5 遗留修复后：明文凭据 argv 直接被拒（PLAINTEXT_SECRET），
+  // 不再"允许传入+脱敏显示"——commands_json 原样落库，明文一旦进库随备份扩散。
+  // 此处用 vault 引用走通 fake，断言返回/日志里只有引用名、无明文。
   const { dir } = isolated.prepareWorkspace({ source: { kind: 'empty' } });
   try {
     const r = await isolated.execute({
       workdir: dir,
-      commands: [{ argv: ['node', '-e', '1', '--token', 'sekritABC'] }],
+      commands: [{ argv: ['node', '-e', '1', '--token', 'vault:ci_token'] }],
       mode: 'fake',
     });
-    assert.ok(!r.log.includes('sekritABC'), 'fake 日志回显应脱敏');
-    assert.ok(r.commands[0].argv.includes('***'), '返回的 argv 应脱敏');
-    assert.ok(!r.commands[0].argv.includes('sekritABC'));
+    assert.equal(r.ok, true, 'vault 引用应放行');
+    assert.ok(!JSON.stringify(r.commands).includes('ci_token'), '返回的 argv 应脱敏（连引用名也打码）');
+    await assert.rejects(
+      isolated.execute({
+        workdir: dir,
+        commands: [{ argv: ['node', '-e', '1', '--token', 'sekritABC'] }],
+        mode: 'fake',
+      }),
+      (e) => e?.details?.code === 'PLAINTEXT_SECRET');
   } finally { isolated.cleanupWorkspace(dir); }
 });
 
@@ -607,4 +615,60 @@ test('R5 prepareWorkspace 超时熔断（M-9）', async () => {
   const root = isolated.runnerRoot();
   const leftovers = readdirSync(root).filter((n) => n.startsWith('ws_'));
   assert.equal(leftovers.length, 0, '超时后不应残留半成品工作区');
+});
+
+// ---------- batch5 遗留修复：R5 重开项回归 ----------
+
+test('R5-1 cwd symlink 逃逸不再被静默吞掉 → PATH_ESCAPE', async () => {
+  const { symlinkSync, writeFileSync: wfs, mkdirSync: mds } = await import('node:fs');
+  const { dir } = isolated.prepareWorkspace({ source: { kind: 'empty' } });
+  try {
+    const outside = mds(await import('node:os').then((o) => o.tmpdir() + '/deyi-r5out-' + Date.now()), { recursive: true });
+    wfs(outside + '/loot.txt', 'secret-outside');
+    symlinkSync(outside, dir + '/evil-link');
+    await assert.rejects(
+      isolated.execute({ workdir: dir, commands: [{ argv: ['node', '-e', '1'], cwd: 'evil-link' }] }),
+      (e) => e?.details?.code === 'PATH_ESCAPE',
+      'cwd symlink 指向 jail 外必须拒绝，不能静默回退到词法路径');
+  } finally { isolated.cleanupWorkspace(dir); }
+});
+
+test('R5-2 argv 明文凭据被拒（--token xxx / --token=xxx），vault 引用放行', async () => {
+  const { dir } = isolated.prepareWorkspace({ source: { kind: 'empty' } });
+  try {
+    await assert.rejects(
+      isolated.execute({ workdir: dir, commands: [{ argv: ['node', 'x', '--token', '明文不该入库'] }] }),
+      (e) => e?.details?.code === 'PLAINTEXT_SECRET');
+    await assert.rejects(
+      isolated.execute({ workdir: dir, commands: [{ argv: ['node', 'x', '--api-key=sk-live-xxx'] }] }),
+      (e) => e?.details?.code === 'PLAINTEXT_SECRET');
+    // vault 引用放行（fake 模式只验输入不执行）
+    const r = await isolated.execute({
+      workdir: dir, commands: [{ argv: ['node', 'x', '--token', 'vault:ci_token'] }], mode: 'fake',
+    });
+    assert.equal(r.ok, true);
+  } finally { isolated.cleanupWorkspace(dir); }
+});
+
+test('R5-3 产物收集 symlink 后验：链接指向 jail 外被拒，run 记 failed', async () => {
+  const req = await mkReq('R5-3 产物');
+  const chg = await mkChg(req.id);
+  const outside = mkdtempSync(join(tmpdir(), 'deyi-r5art-'));
+  writeFileSync(join(outside, 'loot.txt'), 'outside-secret');
+  // sourceDir 里放一个指向 jail 外的 symlink，build 步骤声明它为产物
+  const src = mkdtempSync(join(tmpdir(), 'deyi-r5artsrc-'));
+  const { symlinkSync } = await import('node:fs');
+  symlinkSync(join(outside, 'loot.txt'), join(src, 'evil.txt'));
+  const r = await runStep(chg.id, 'build', {
+    sourceDir: src,
+    commands: [{ argv: ['node', '-e', '1'], name: 'noop' }],
+    artifacts: [{ kind: 'report', path: 'evil.txt' }],
+  });
+  // 产物收集时 symlink 后验拒绝 → fail-closed：请求 400，run 记 failed（不卡死）
+  assert.equal(r.status, 400);
+  assert.match(JSON.stringify(await r.json()), /PATH_ESCAPE/);
+  const runs = (await (await get(`${P()}/change-packages/${chg.id}/runner-runs`)).json()).data;
+  const run = runs[runs.length - 1];
+  assert.equal(run.status, 'failed');
+  assert.deepEqual(run.artifacts, [], '逃逸产物不得登记（loot 内容未进库）');
 });

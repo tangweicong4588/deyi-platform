@@ -73,31 +73,73 @@ async function getKeycloakJwks() {
 }
 
 // Keycloak JWT 签名算法白名单（拒绝 none / HS256 等算法混淆）
-const KC_ALLOWED_ALG = new Set(['RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'ES512']);
+// alg → 验签哈希映射（batch1 遗留修复：原来硬编码 SHA256，RS384/512、ES384/512 会验签失败）
+const KC_ALG_HASH = {
+  RS256: 'SHA256', RS384: 'SHA384', RS512: 'SHA512',
+  ES256: 'SHA256', ES384: 'SHA384', ES512: 'SHA512',
+};
+const KC_ALLOWED_ALG = new Set(Object.keys(KC_ALG_HASH));
 // exp 时钟偏差容忍（秒）
 const CLOCK_SKEW_S = 30;
+
+/**
+ * JWS ECDSA 签名是 raw R||S 定长拼接；node createVerify 要 DER 编码。
+ * batch1 遗留修复：原来 ES256/384/512 在白名单里但没做这个转换，ES 签名永远验不过
+ * （报"签名无效"，fail-closed 但原因误导）。现在按 alg 的坐标长度正确转 DER。
+ */
+function derEncodeEcdsaSig(raw, coordLen, what = 'JWT') {
+  if (raw.length !== coordLen * 2) throw Errors.unauthorized(`${what} ECDSA 签名长度无效`);
+  const ints = [raw.subarray(0, coordLen), raw.subarray(coordLen)].map((p) => {
+    let i = 0;
+    while (i < p.length - 1 && p[i] === 0) i++; // 去前导零
+    let v = p.subarray(i);
+    if (v[0] & 0x80) v = Buffer.concat([Buffer.from([0x00]), v]); // 高位置 1 则补 0x00 防负数
+    return Buffer.concat([Buffer.from([0x02, v.length]), v]);
+  });
+  const body = Buffer.concat(ints);
+  // DER 长度编码：短式（<128）/ 长式
+  const lenBytes = body.length < 128
+    ? Buffer.from([body.length])
+    : Buffer.from([0x81, body.length]);
+  return Buffer.concat([Buffer.from([0x30]), lenBytes, body]);
+}
+const ES_COORD_LEN = { ES256: 32, ES384: 48, ES512: 66 }; // P-256/384/521
+
+/**
+ * Keycloak JWT 签名验签核心（batch1 回归测试入口）：header 解析 → 算法白名单 →
+ * JWKS 选钥 → 验签，返回 { header, claims }。验签失败抛 401。
+ * keys 由调用方传入（生产走 getKeycloakJwks，测试可注入）。
+ */
+async function verifyKeycloakSignature(token, keys) {
+  const { createVerify, createPublicKey } = await import('node:crypto');
+  const [hB64, pB64, sigB64] = String(token).split('.');
+  if (!hB64 || !pB64 || !sigB64) throw Errors.unauthorized('非法 JWT');
+  let header, claims;
+  try {
+    header = JSON.parse(b64urlDecode(hB64));
+    claims = JSON.parse(b64urlDecode(pB64));
+  } catch { throw Errors.unauthorized('非法 JWT'); }
+  if (!KC_ALLOWED_ALG.has(header.alg)) throw Errors.unauthorized('JWT 签名算法不在白名单');
+  const jwk = (keys || []).find((k) => k.kid === header.kid) || (keys || [])[0];
+  if (!jwk) throw Errors.unauthorized('Keycloak 公钥未找到');
+  const keyObj = createPublicKey({ key: jwk, format: 'jwk' });
+  let sig = Buffer.from(sigB64.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  if (header.alg.startsWith('ES')) sig = derEncodeEcdsaSig(sig, ES_COORD_LEN[header.alg]);
+  const ok = createVerify(KC_ALG_HASH[header.alg])
+    .update(`${hB64}.${pB64}`)
+    .verify(keyObj, sig);
+  if (!ok) throw Errors.unauthorized('JWT 签名无效');
+  return { header, claims };
+}
+
+/** 测试钩子：验签核心 + 算法映射（验签路径与生产完全一致） */
+export const __internal = { verifyKeycloakSignature, KC_ALG_HASH, KC_ALLOWED_ALG };
 
 function keycloakIdp() {
   return {
     kind: 'keycloak',
     verifyJwt: async (token) => {
-      const { createVerify } = await import('node:crypto');
-      const [hB64, pB64, sigB64] = String(token).split('.');
-      if (!hB64 || !pB64 || !sigB64) throw Errors.unauthorized('非法 JWT');
-      let header, claims;
-      try {
-        header = JSON.parse(b64urlDecode(hB64));
-        claims = JSON.parse(b64urlDecode(pB64));
-      } catch { throw Errors.unauthorized('非法 JWT'); }
-      if (!KC_ALLOWED_ALG.has(header.alg)) throw Errors.unauthorized('JWT 签名算法不在白名单');
-      const keys = await getKeycloakJwks();
-      const jwk = keys.find((k) => k.kid === header.kid) || keys[0];
-      if (!jwk) throw Errors.unauthorized('Keycloak 公钥未找到');
-      const keyObj = (await import('node:crypto')).createPublicKey({ key: jwk, format: 'jwk' });
-      const ok = createVerify('SHA256')
-        .update(`${hB64}.${pB64}`)
-        .verify(keyObj, Buffer.from(sigB64.replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
-      if (!ok) throw Errors.unauthorized('JWT 签名无效');
+      const { claims } = await verifyKeycloakSignature(token, await getKeycloakJwks());
       const nowS = Math.floor(Date.now() / 1000);
       if (claims.exp && claims.exp < nowS - CLOCK_SKEW_S) throw Errors.unauthorized('JWT 已过期');
       if (claims.nbf && claims.nbf > nowS + CLOCK_SKEW_S) throw Errors.unauthorized('JWT 尚未生效');

@@ -136,6 +136,59 @@ export async function recordCall(row) {
   return full;
 }
 
+/**
+ * R6 数据 review 重构：记账原子单元。
+ * call（调用账本）+ 租户预算 + 项目预算在同一事务内提交——任一步失败整体回滚，
+ * 彻底消除"call 已落库但预算没累加"的中间态。补记（outbox）整体重放同一 callRow 即可，
+ * 不再需要"call 存在则跳过全部"的分阶段逻辑（该逻辑正是漏记预算的根因）。
+ * 幂等：callRow.id 为主键；并发重放命中唯一约束时视为已记账（返回 null），不抛错。
+ */
+export async function persistUsageAtomic({ callRow, tenantId, projectId, periodKey }) {
+  // id/created_at 在调用方预生成：补记重试复用同一 id，防重复记账
+  const full = { id: newId('call'), created_at: nowMs(), ...callRow };
+  try {
+    await db().transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO model_calls(id,tenant_id,project_id,actor_id,trace_id,model,litellm_model,endpoint,
+         prompt_tokens,completion_tokens,total_tokens,cost_cents,latency_ms,status,cached,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [full.id, full.tenant_id, full.project_id, full.actor_id, full.trace_id, full.model,
+         full.litellm_model, full.endpoint, full.prompt_tokens, full.completion_tokens,
+         full.total_tokens, full.cost_cents, full.latency_ms, full.status, full.cached ? 1 : 0, full.created_at]);
+      const now = nowMs();
+      const tokens = full.total_tokens || 0;
+      const cents = full.cost_cents || 0;
+      const tRows = await tx.query(
+        `SELECT id FROM budgets WHERE tenant_id=? AND COALESCE(project_id,'')=COALESCE(?,'')
+         AND period='monthly' AND period_key=?`,
+        [tenantId, null, periodKey]);
+      if (tRows[0]) {
+        await tx.query(
+          `UPDATE budgets SET used_cost_cents=used_cost_cents+?, used_tokens=used_tokens+?, updated_at=?
+           WHERE id=?`, [cents, tokens, now, tRows[0].id]);
+      }
+      if (projectId) {
+        const pRows = await tx.query(
+          `SELECT id FROM budgets WHERE tenant_id=? AND COALESCE(project_id,'')=COALESCE(?,'')
+           AND period='monthly' AND period_key=?`,
+          [tenantId, projectId, periodKey]);
+        if (pRows[0]) {
+          await tx.query(
+            `UPDATE budgets SET used_cost_cents=used_cost_cents+?, used_tokens=used_tokens+?, updated_at=?
+             WHERE id=?`, [cents, tokens, now, pRows[0].id]);
+        }
+      }
+    });
+    return full;
+  } catch (e) {
+    // 幂等重放：call 主键冲突说明该调用已记过账（并发补记/重试），不视为失败
+    if (/unique|duplicate|23505/i.test(e.message || '') && await getCallById(full.id)) {
+      return null;
+    }
+    throw e;
+  }
+}
+
 export async function listCalls(tenantId, limit = 100) {
   const n = Math.min(Math.max(Number(limit) || 100, 1), 500);
   return db().query(

@@ -429,18 +429,22 @@ export async function answerClarification(tenantId, id, { answer, answeredBy }) 
 }
 
 // ---------- gate_exceptions（gex_）：门禁例外审批（复用 P6 审批语义） ----------
-const normGex = (r) => r && { ...r, missing_items: parseJson(r.missing_items, []) };
+const normGex = (r) => r && {
+  ...r,
+  missing_items: parseJson(r.missing_items, []),
+  broad_waiver: Number(r.broad_waiver) === 1,
+};
 
 export async function createGateException({ tenantId, projectId, pipelineRunId, stage,
-  missingItems = [], reason = '', requestedBy }) {
+  missingItems = [], reason = '', requestedBy, broadWaiver = false }) {
   const id = newId('gex');
   const now = nowMs();
   await db().query(
     `INSERT INTO gate_exceptions(id,tenant_id,project_id,pipeline_run_id,stage,missing_items,reason,
-      status,requested_by,decided_by,decided_at,created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      status,requested_by,decided_by,decided_at,created_at,broad_waiver)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [id, tenantId, projectId, pipelineRunId, stage, JSON.stringify(missingItems), reason,
-      'pending', requestedBy, null, null, now]);
+      'pending', requestedBy, null, null, now, broadWaiver ? 1 : 0]);
   return getGateException(tenantId, id);
 }
 

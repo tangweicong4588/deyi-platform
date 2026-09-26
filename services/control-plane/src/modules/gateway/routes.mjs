@@ -54,7 +54,7 @@ async function persistUsage({ tenantId, project, actorId, traceId, model, endpoi
   const totalTokens = usage?.total_tokens || (promptTokens + completionTokens);
   const costCents = calcCostCents(model, promptTokens, completionTokens);
   const callRow = {
-    // id 在此预生成：补记重试时复用同一 id（recordCall 的 spread 会保留它），防重复记账
+    // id 在此预生成：补记重试时复用同一 id（persistUsageAtomic 的 spread 会保留它），防重复记账
     id: newId('call'), created_at: nowMs(),
     tenant_id: tenantId, project_id: project?.id || null, actor_id: actorId, trace_id: traceId,
     model: model.name, litellm_model: model.litellm_model, endpoint,
@@ -62,21 +62,20 @@ async function persistUsage({ tenantId, project, actorId, traceId, model, endpoi
     cost_cents: costCents, latency_ms: latencyMs, status, cached: cached ? 1 : 0,
   };
   try {
-    await gstore.recordCall(callRow);
-    const pk = gstore.currentPeriodKey();
-    const tb = await gstore.getBudget(tenantId, null, pk);
-    if (tb) await gstore.addUsage(tb.id, totalTokens, costCents);
-    if (project) {
-      const pb = await gstore.getBudget(tenantId, project.id, pk);
-      if (pb) await gstore.addUsage(pb.id, totalTokens, costCents);
-    }
+    // R6 数据 review：记账原子单元——call + 两级预算同一事务提交，
+    // 任一步失败整体回滚，不再有"call 已落库但预算没累加"的中间态。
+    await gstore.persistUsageAtomic({
+      callRow, tenantId, projectId: project?.id || null, periodKey: gstore.currentPeriodKey(),
+    });
     return { totalTokens, costCents, meteringDeferred: false };
   } catch (e) {
     logger.error('gateway metering failed — queued to outbox (upstream success preserved)', {
       traceId, model: model.name, err: e.message,
     });
     try {
-      await gstore.enqueueUsageOutbox(tenantId, { callRow }, e.message);
+      // R6 复核：账期必须在入队时固化。补记可能跨月执行，若用补记时的 currentPeriodKey()，
+      // 上月积压的调用会被记入本月预算桶。payload 自带 periodKey，reconcile 原样回放。
+      await gstore.enqueueUsageOutbox(tenantId, { callRow, periodKey: gstore.currentPeriodKey() }, e.message);
     } catch (e2) {
       // 连 outbox 都写不进：只剩结构化日志兜底，仍不转 500
       logger.error('gateway metering outbox write failed — manual reconcile from logs required', {
@@ -89,8 +88,9 @@ async function persistUsage({ tenantId, project, actorId, traceId, model, endpoi
 
 /**
  * 补记 outbox：把记账失败暂存的调用逐条回写。
- * 幂等：callRow.id 在 persistUsage 时预生成；崩溃重试时先查后写——已落库的调用
- * 跳过记账与预算累加，直接标记 processed，不重复记账。
+ * R6 数据 review：整体重放 persistUsageAtomic（同一事务：call + 两级预算）。
+ * 幂等：callRow.id 为主键，重复重放返回 null（已记账）而不抛错；"call 已存在则跳过
+ * 全部"的旧逻辑已删除——它正是"call 落库成功、预算累加失败"时永久漏记预算的根因。
  * 由 operator 手动触发（POST /v1/admin/metering/reconcile）或定时任务调用。
  */
 export async function reconcileUsageOutbox({ limit = 100 } = {}) {
@@ -98,18 +98,15 @@ export async function reconcileUsageOutbox({ limit = 100 } = {}) {
   let ok = 0, fail = 0;
   for (const row of pending) {
     try {
-      const { callRow } = JSON.parse(row.payload_json || '{}');
+      const { callRow, periodKey } = JSON.parse(row.payload_json || '{}');
       if (!callRow || !callRow.tenant_id) throw new Error('outbox payload 缺 callRow');
-      if (!(await gstore.getCallById(callRow.id))) {
-        await gstore.recordCall(callRow);
-        const pk = gstore.currentPeriodKey();
-        const tb = await gstore.getBudget(callRow.tenant_id, null, pk);
-        if (tb) await gstore.addUsage(tb.id, callRow.total_tokens || 0, callRow.cost_cents || 0);
-        if (callRow.project_id) {
-          const pb = await gstore.getBudget(callRow.tenant_id, callRow.project_id, pk);
-          if (pb) await gstore.addUsage(pb.id, callRow.total_tokens || 0, callRow.cost_cents || 0);
-        }
-      }
+      await gstore.persistUsageAtomic({
+        callRow,
+        tenantId: callRow.tenant_id,
+        projectId: callRow.project_id || null,
+        // 用入队时固化的账期回放；老 payload 缺 periodKey 时回退到当前账期（兼容）
+        periodKey: periodKey || gstore.currentPeriodKey(),
+      });
       await gstore.markUsageOutboxProcessed(row.id);
       ok++;
     } catch (e) {

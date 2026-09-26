@@ -233,8 +233,13 @@ export async function advanceStage({ tenantId, projectId, actorId, runId, decisi
   if (missing.length) {
     // 门禁未满足时，只有"已批准且覆盖全部缺失项"的例外能放行；
     // 否则如实返回阻断（200 blocked），绝不静默通过。
+    // batch3 遗留修复：contract.ac（整包豁免，需 broad_waiver 确认）在覆盖检查中
+    // 蕴含其下的 ac:<id> 逐项——宽泛豁免的语义就是豁免整包所有 AC。
     const approved = await store.listGateExceptions(tenantId, run.id, { status: 'approved' });
-    const cover = approved.find((g) => missing.every((m) => g.missing_items.includes(m)));
+    const covers = (g, m) =>
+      g.missing_items.includes(m) ||
+      (m.startsWith('ac:') && g.missing_items.includes('contract.ac') && !!g.broad_waiver);
+    const cover = approved.find((g) => missing.every((m) => covers(g, m)));
     if (cover) waivedBy = cover.id;
   }
 
@@ -369,10 +374,18 @@ export async function requestGateException({ tenantId, projectId, actorId, runId
   if (run.status !== 'gated' || !missing.length) {
     throw Errors.badRequest('该阶段未被门禁阻断，无需例外审批');
   }
-  const { missingItems = missing, reason = '' } = body || {};
+  const { missingItems = missing, reason = '', broadWaiver = false } = body || {};
   const items = Array.isArray(missingItems) && missingItems.length ? missingItems : missing;
   for (const m of items) {
     if (!missing.includes(m)) throw Errors.badRequest(`例外项 ${m} 不在当前缺失清单内`);
+  }
+  // batch3 遗留修复：contract.ac 是包级宽泛豁免键，一次批准可豁免整包所有 AC。
+  // 优先用逐项 ac:<id>；若坚持整包豁免，必须显式 broadWaiver=true 确认（审批/审计留痕）。
+  const wantsBroad = items.includes('contract.ac');
+  if (wantsBroad && broadWaiver !== true) {
+    throw Errors.badRequest(
+      '整包豁免（contract.ac）需显式确认：请逐项使用 ac:<id> 申请，或在请求中设置 broadWaiver=true 确认已知悉整包豁免范围',
+      { code: 'BROAD_WAIVER_CONFIRM_REQUIRED' });
   }
   // 幂等：同缺失集合的待决单直接返回
   const pending = await store.listGateExceptions(tenantId, run.id, { status: 'pending' });
@@ -382,11 +395,12 @@ export async function requestGateException({ tenantId, projectId, actorId, runId
   const gex = await store.createGateException({
     tenantId, projectId, pipelineRunId: run.id, stage: run.stage,
     missingItems: items, reason: String(reason).slice(0, 2000), requestedBy: actorId,
+    broadWaiver: wantsBroad,
   });
   await tryAudit({
     tenantId, projectId, actorId, action: 'pipeline.gate_exception.request',
     resourceKind: 'gate_exception', resourceId: gex.id,
-    payload: { stage: run.stage, missing_items: items, reason: gex.reason },
+    payload: { stage: run.stage, missing_items: items, reason: gex.reason, broad_waiver: wantsBroad },
   });
   return gex;
 }
@@ -395,6 +409,10 @@ export async function decideGateException({ tenantId, projectId, actorId, roles,
   assertTenantActor(actorId, '决议门禁例外审批');
   const gex = await store.getGateException(tenantId, gexId).catch(() => null);
   if (!gex || gex.project_id !== projectId) throw Errors.notFound('例外审批单不存在');
+  // batch3 遗留修复（L 级）：SoD——申请人不能批准自己的门禁例外
+  if (gex.requested_by === actorId) {
+    throw Errors.forbidden('门禁例外审批需职责分离：申请人不能批准自己的例外申请', { code: 'SOD_VIOLATION' });
+  }
   // 纵深防御：路由层已做 rank 检查，这里再查一次（复用 P6 decideApproval 模式）
   const { effectiveRank } = await import('../identity/middleware.mjs');
   if (effectiveRank(roles, projectId) < 1) throw Errors.forbidden('例外审批需要 operator 及以上角色');
@@ -403,7 +421,11 @@ export async function decideGateException({ tenantId, projectId, actorId, roles,
     tenantId, projectId, actorId,
     action: approved ? 'pipeline.gate_exception.approve' : 'pipeline.gate_exception.reject',
     resourceKind: 'gate_exception', resourceId: gexId,
-    payload: { stage: gex.stage, missing_items: gex.missing_items, reason: reason || null },
+    payload: {
+      stage: gex.stage, missing_items: gex.missing_items, reason: reason || null,
+      broad_waiver: !!gex.broad_waiver,
+      requested_by: gex.requested_by,
+    },
   });
   return out;
 }

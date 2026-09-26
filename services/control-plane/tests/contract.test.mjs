@@ -28,7 +28,7 @@ const { createApp } = await import('../src/kernel/http.mjs');
 const { registerIdentityRoutes } = await import('../src/modules/identity/routes.mjs');
 const { registerDeliveryRoutes } = await import('../src/modules/delivery/routes.mjs');
 
-let tenant, project, adminActorId, adminSecret;
+let tenant, project, adminActorId, adminSecret, admin2Secret;
 let tenantB, projectB, bSecret;
 let fixtureDir, bareRepo;
 
@@ -45,6 +45,12 @@ before(async () => {
   const ak = mintKey();
   await store.createApiKeyRow({ tenantId: tenant.id, actorId: admin.id, name: 'ct-admin', prefix: ak.prefix, keyHash: ak.keyHash });
   adminSecret = ak.secret;
+  // 第二审批人：门禁例外 SoD 要求申请人与审批人分离
+  const admin2 = await store.createActor(tenant.id, { kind: 'user', name: 'CONTRACT Admin2' });
+  await store.bindRole(tenant.id, admin2.id, null, 'admin');
+  const ak2 = mintKey();
+  await store.createApiKeyRow({ tenantId: tenant.id, actorId: admin2.id, name: 'ct-admin2', prefix: ak2.prefix, keyHash: ak2.keyHash });
+  admin2Secret = ak2.secret;
 
   tenantB = await store.createTenant({ name: 'CONTRACT Tenant B' });
   projectB = await store.createProject(tenantB.id, { name: 'CONTRACT B Project' });
@@ -319,11 +325,15 @@ test('门禁联动：合同 fail 项进入门禁缺失清单，可经例外审�
   assert.ok(b1.data.missing.includes('contract.reproduce'), '合同 fail 项进入门禁缺失');
   assert.ok(b1.data.missing.includes('artifact:report'));
 
-  // 例外审批覆盖全部缺失项（走真实 API 路径）
+  // 例外审批覆盖全部缺失项（走真实 API 路径）。
+  // SoD：申请人（adminSecret）不能自批，换第二审批人决议。
   const gex = await (await post(`${D(project.id)}/pipeline-runs/${hoRunId}/gate-exceptions`,
     { missingItems: ['contract.reproduce', 'artifact:report'], reason: '测试豁免' })).json();
+  const selfDecide = await post(`${D(project.id)}/gate-exceptions/${gex.data.id}/decide`,
+    { approved: true, reason: '自批' });
+  assert.equal(selfDecide.status, 403, '申请人自批应被 SoD 拒绝');
   const dec = await post(`${D(project.id)}/gate-exceptions/${gex.data.id}/decide`,
-    { approved: true, reason: 'ok' });
+    { approved: true, reason: 'ok' }, admin2Secret);
   assert.equal(dec.status, 200);
 
   // assemble：合同现场评估发现 waive → 通过

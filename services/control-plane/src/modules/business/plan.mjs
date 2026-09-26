@@ -540,13 +540,17 @@ export async function resetPlan({ tenantId, projectId, planId, actorId }) {
     throw Errors.badRequest('没有可重置的失败动作', { code: 'NOTHING_TO_RESET' });
   }
   const reset = [];
+  const resets = [];
   for (const a of retryable) {
     const n = await store.countActionExecutions(tenantId, a.id);
     const newKey = createHash('sha256').update(`${planId}:${a.seq}:retry:${n + 1}`).digest('hex').slice(0, 32);
-    const ra = await store.resetActionForRetry(tenantId, a.id, newKey);
-    reset.push({ action_id: a.id, seq: a.seq, idempotency_key: newKey, status: ra.status });
+    resets.push({ actionId: a.id, seq: a.seq, newKey });
   }
-  await store.setIntentStatus(tenantId, plan.intent_id, 'approved');
+  // batch4 遗留修复：多动作重置 + 意图回退同一事务，中途失败整体回滚（无部分重置）
+  await store.resetPlanAtomic({ tenantId, intentId: plan.intent_id, resets });
+  for (const r of resets) {
+    reset.push({ action_id: r.actionId, seq: r.seq, idempotency_key: r.newKey, status: 'approved' });
+  }
   const c = ctx();
   await tryAudit({
     tenantId, projectId, actorId, traceId: c.traceId,

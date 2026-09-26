@@ -284,3 +284,80 @@ test('R6 计量失败不改写上游成功：仍 200 + 进 outbox + 可补记（
   assert.equal(res.fail, 0);
   assert.equal(await gstore.countPendingUsageOutbox(), 0);
 });
+
+test('R6-2 记账原子单元：call + 两级预算同一事务，幂等重放不重复累加', async () => {
+  const pk = gstore.currentPeriodKey();
+  const tb0 = await gstore.getBudget(tenant.id, null, pk);
+  const pb0 = await gstore.getBudget(tenant.id, project.id, pk);
+  const tUsed0 = tb0.used_tokens, pUsed0 = pb0.used_tokens;
+  const callRow = {
+    id: 'call_r6atomic_test', tenant_id: tenant.id, project_id: project.id, actor_id: actor.id,
+    trace_id: 'trace-r6', model: 'deyi-default', litellm_model: 'fake', endpoint: '/v1/gw/chat/completions',
+    prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost_cents: 2,
+    latency_ms: 1, status: 'ok', cached: 0, created_at: Date.now(),
+  };
+  const r1 = await gstore.persistUsageAtomic({
+    callRow, tenantId: tenant.id, projectId: project.id, periodKey: pk,
+  });
+  assert.ok(r1 && r1.id === callRow.id, '首次记账应成功');
+  assert.ok(await gstore.getCallById(callRow.id), 'call 应落库');
+  assert.equal((await gstore.getBudget(tenant.id, null, pk)).used_tokens, tUsed0 + 15, '租户预算应累加');
+  assert.equal((await gstore.getBudget(tenant.id, project.id, pk)).used_tokens, pUsed0 + 15, '项目预算应累加');
+  // 幂等重放：同一 callRow 再记一次 → 返回 null，预算不再累加
+  const r2 = await gstore.persistUsageAtomic({
+    callRow, tenantId: tenant.id, projectId: project.id, periodKey: pk,
+  });
+  assert.equal(r2, null, '重复记账应幂等返回 null');
+  assert.equal((await gstore.getBudget(tenant.id, null, pk)).used_tokens, tUsed0 + 15, '租户预算不得重复累加');
+  assert.equal((await gstore.getBudget(tenant.id, project.id, pk)).used_tokens, pUsed0 + 15, '项目预算不得重复累加');
+});
+
+test('R6-3 记账中途失败整体回滚：预算表异常时 call 也不落库', async () => {
+  const callRow = {
+    id: 'call_r6rollback_test', tenant_id: tenant.id, project_id: project.id, actor_id: actor.id,
+    trace_id: 'trace-r6rb', model: 'deyi-default', litellm_model: 'fake', endpoint: '/v1/gw/chat/completions',
+    prompt_tokens: 1, completion_tokens: 1, total_tokens: 2, cost_cents: 1,
+    latency_ms: 1, status: 'ok', cached: 0, created_at: Date.now(),
+  };
+  await db().exec('DROP TABLE budgets'); // 模拟预算累加失败
+  try {
+    await assert.rejects(
+      () => gstore.persistUsageAtomic({
+        callRow, tenantId: tenant.id, projectId: project.id, periodKey: gstore.currentPeriodKey(),
+      }));
+    assert.equal(await gstore.getCallById(callRow.id), null, '回滚后 call 不得残留（旧逻辑会漏下这条）');
+  } finally {
+    // 重建 budgets 表（结构取自 004 migration 的 budgets 定义子集，测试够用）
+    await db().exec(`CREATE TABLE IF NOT EXISTS budgets (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT, period TEXT NOT NULL,
+      cost_limit_cents INTEGER, token_limit INTEGER, used_cost_cents INTEGER NOT NULL DEFAULT 0,
+      used_tokens INTEGER NOT NULL DEFAULT 0, period_key TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+  }
+});
+
+test('R6-3 outbox 补记使用入队时固化的账期（不串月）', async () => {
+  const { reconcileUsageOutbox } = await import('../src/modules/gateway/routes.mjs');
+  const oldPk = '2020-01'; // 足够老的账期，不会与当前账期相同
+  assert.notEqual(oldPk, gstore.currentPeriodKey());
+  await db().query(
+    `INSERT INTO budgets(id,tenant_id,project_id,period,cost_limit_cents,token_limit,
+     used_cost_cents,used_tokens,period_key,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ['bdg_oldpk_test', tenant.id, null, 'monthly', 100000, 1000000, 0, 0, oldPk, 'active', Date.now(), Date.now()]);
+  const curPk = gstore.currentPeriodKey();
+  const curBefore = (await gstore.getBudget(tenant.id, null, curPk))?.used_tokens || 0;
+  const callRow = {
+    id: 'call_oldpk_test', tenant_id: tenant.id, project_id: null, actor_id: actor.id,
+    trace_id: 't-oldpk', model: 'deyi-default', litellm_model: 'fake', endpoint: '/x',
+    prompt_tokens: 3, completion_tokens: 2, total_tokens: 5, cost_cents: 1,
+    latency_ms: 1, status: 'ok', cached: 0, created_at: Date.now(),
+  };
+  await gstore.enqueueUsageOutbox(tenant.id, { callRow, periodKey: oldPk }, 'test');
+  const res = await reconcileUsageOutbox({ limit: 100 });
+  assert.equal(res.fail, 0, '补记不应失败');
+  const oldB = await gstore.getBudget(tenant.id, null, oldPk);
+  assert.equal(oldB.used_tokens, 5, '旧账期预算应累加');
+  const curB = await gstore.getBudget(tenant.id, null, curPk);
+  assert.equal(curB?.used_tokens || 0, curBefore, '当前账期预算不应被串改');
+});

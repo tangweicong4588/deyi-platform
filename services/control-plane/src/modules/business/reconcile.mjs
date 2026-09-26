@@ -72,7 +72,11 @@ export async function transitionRecon({ tenantId, projectId, reconId, to, actorI
   }
   if (to === 'closed') patch.closed_at = nowMs();
 
-  const updated = await store.updateReconciliation(tenantId, recon.id, patch);
+  const updated = await store.updateReconciliation(tenantId, recon.id, patch, recon.status);
+  if (!updated) {
+    // CAS 未命中：并发推进已改变状态，拒绝覆盖
+    throw Errors.conflict('对账项状态已被并发修改，请刷新后重试', { code: 'RECON_CONCURRENT_MODIFIED' });
+  }
   const verb = { investigating: 'investigate', resolved: 'resolve', escalated: 'escalate', closed: 'close' }[to] || to;
   await tryAudit({
     tenantId, projectId, actorId, traceId: c.traceId,
