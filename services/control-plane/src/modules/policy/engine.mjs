@@ -144,6 +144,20 @@ export function decideBuiltin(input) {
       : deny('业务意图写入需要 operator 角色');
   }
 
+  // R6c: 业务任务域 —— tasks.read 需 viewer+，tasks.write 需 operator+
+  if (action === 'tasks.read') {
+    const pj8 = requireProject(); if (pj8) return pj8;
+    return rankOf(actor.roles, project.id) >= 0
+      ? allow('任务域读取（viewer+）')
+      : deny('任务域读取需要 viewer 角色');
+  }
+  if (action === 'tasks.write') {
+    const pj9 = requireProject(); if (pj9) return pj9;
+    return rankOf(actor.roles, project.id) >= 1
+      ? allow('任务域写入（operator+）')
+      : deny('任务域写入需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }
