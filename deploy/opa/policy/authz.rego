@@ -168,6 +168,15 @@ deny_reason contains "制品库写入需要 operator 角色" if {
 	input.action == "artifact.write"; effective_rank(input.project.id) < 2
 }
 
+# R6h: 全链路追溯 —— trace.read 需 viewer+（只读）
+allow if {
+	input.action == "trace.read"
+	effective_rank(input.project.id) >= 1
+}
+deny_reason contains "追溯读取需要 viewer 角色" if {
+	input.action == "trace.read"; effective_rank(input.project.id) < 1
+}
+
 reason := [r | some r in deny_reason][0] if { not allow } else := "default allow"
 
 result := {

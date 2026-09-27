@@ -26,6 +26,7 @@ import { registerMemoryRoutes } from './modules/memory/routes.mjs';
 import { registerBillingRoutes } from './modules/billing/routes.mjs';
 import { registerArtifactRoutes } from './modules/artifacts/routes.mjs';
 import { registerSagaRoutes } from './modules/sagas/routes.mjs';
+import { registerTraceabilityRoutes } from './modules/traceability/routes.mjs';
 import { registerOpenApiRoutes } from './modules/openapi/routes.mjs';
 import { initEvidence } from './modules/evidence/audit.mjs';
 import { tracingMiddleware, isTracingEnabled } from './kernel/tracing.mjs';
@@ -77,6 +78,7 @@ async function main() {
   registerBillingRoutes(app);
   registerArtifactRoutes(app);
   registerSagaRoutes(app);
+  registerTraceabilityRoutes(app);
   registerOpenApiRoutes(app); // V2.9：必须在所有业务路由注册之后（快照完整路由表）
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {

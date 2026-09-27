@@ -214,6 +214,14 @@ export function decideBuiltin(input) {
       : deny('长流程写入需要 operator 角色');
   }
 
+  // R6h: 全链路追溯 —— trace.read 需 viewer+（只读）
+  if (action === 'trace.read') {
+    const pj17 = requireProject(); if (pj17) return pj17;
+    return rankOf(actor.roles, project.id) >= 0
+      ? allow('追溯读取（viewer+）')
+      : deny('追溯读取需要 viewer 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }
