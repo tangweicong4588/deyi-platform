@@ -63,13 +63,13 @@ export async function probeTemporal() {
  * 注意：args 原文不进 workflow input，只进脱敏版——密钥材料走 vault_ref）。
  * 返回 { workflowId, runId }；失败抛错 → 调用方降级本地执行。
  */
-export async function submitWorkflow({ namespace, workflowId, input }) {
+export async function submitWorkflow({ namespace, workflowId, input, workflowType = 'deyi.toolCall', taskQueue = TASK_QUEUE }) {
   const json = await tfetch(`/api/v1/namespaces/${encodeURIComponent(namespace)}/workflows`, {
     method: 'POST',
     body: {
       workflowId,
-      workflowType: { name: 'deyi.toolCall' },
-      taskQueue: { name: TASK_QUEUE },
+      workflowType: { name: workflowType },
+      taskQueue: { name: taskQueue },
       workflowExecutionTimeout: '3600s',
       input: {
         payloads: [{ data: Buffer.from(JSON.stringify(input)).toString('base64') }],

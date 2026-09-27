@@ -57,6 +57,7 @@ export const KEY_SCOPES = [
   'billing.read', 'billing.write',
   'evidence.read', 'evidence.write',
   'artifacts.read', 'artifacts.write',
+  'sagas.read', 'sagas.write',
   'identity.keys', // key 管理：签发/轮换/吊销
 ];
 

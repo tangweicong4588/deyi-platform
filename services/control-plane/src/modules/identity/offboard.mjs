@@ -44,6 +44,7 @@ const TABLE_DELETE_ORDER = [
   // --- 叶子：业务单据/执行/访问 ---
   'reconciliation_items', 'acceptance_criteria', 'acl_entries',
   'action_executions', 'artifacts', 'artifact_links', 'artifact_versions', 'artifact_packages',
+  'saga_steps', 'saga_runs', 'sagas',
   'auth_sessions', 'api_keys', 'budgets', 'clarifications',
   'cost_ledger', 'credential_grants', 'evidence_packages', 'executions', 'fact_snapshots',
   'facts', 'gate_exceptions', 'gateway_usage_outbox', 'local_credentials', 'login_attempts',

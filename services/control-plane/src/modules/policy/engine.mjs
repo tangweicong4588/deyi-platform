@@ -200,6 +200,20 @@ export function decideBuiltin(input) {
       : deny('制品库写入需要 operator 角色');
   }
 
+  // R6g: 长流程与补偿 —— saga.read 需 viewer+，saga.write 需 operator+
+  if (action === 'saga.read') {
+    const pj15 = requireProject(); if (pj15) return pj15;
+    return rankOf(actor.roles, project.id) >= 0
+      ? allow('长流程读取（viewer+）')
+      : deny('长流程读取需要 viewer 角色');
+  }
+  if (action === 'saga.write') {
+    const pj16 = requireProject(); if (pj16) return pj16;
+    return rankOf(actor.roles, project.id) >= 1
+      ? allow('长流程写入（operator+）')
+      : deny('长流程写入需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }
