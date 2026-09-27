@@ -15,6 +15,7 @@ import { verifyChain } from './audit.mjs';
 import { buildPackage, verifyPackage, downloadPackage } from './packages.mjs';
 import { anchorChain, getAnchorStatus, verifyAnchors, anchorAllTenants } from './anchor.mjs';
 import { exportAudit } from './compliance.mjs';
+import { sweepAllTenants } from './retention.mjs';
 import { queryCost } from './cost.mjs';
 
 export function registerEvidenceRoutes(app) {
@@ -99,6 +100,15 @@ export function registerEvidenceRoutes(app) {
     async (req, res) => sendJson(res, 200, {
       data: await anchorAllTenants({ actorId: ctx().actorId }),
     }));
+
+  // 数据保留清扫（V2.7，平台 operator）：{ tenantId?, dryRun? }
+  app.post('/v1/admin/retention/sweep', authenticate, requireOperator,
+    async (req, res) => {
+      const { tenantId = null, dryRun = false } = req.body || {};
+      sendJson(res, 200, {
+        data: await sweepAllTenants({ tenantId, dryRun: dryRun === true }),
+      });
+    });
   app.post(base + '/anchor', authenticate, tenantScope, requireTenantRole('operator'),
     async (req, res) => {
       try {

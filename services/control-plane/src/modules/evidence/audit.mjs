@@ -77,7 +77,16 @@ export async function append({ tenantId, projectId = null, actorId, traceId, act
       `SELECT seq, hash FROM audit_events WHERE tenant_id=? ORDER BY seq DESC LIMIT 1`,
       [tenantId]);
     const prevHash = last[0] ? last[0].hash : GENESIS;
-    const seq = last[0] ? Number(last[0].seq) + 1 : 1;
+    // V2.7：seq 永不重启。保留清扫可能删光全部事件，此时 MAX(seq) 归零；
+    // 用 audit_heads.head_seq 做单调计数器，避免新事件复用旧 seq（否则旧锚定
+    // 的 chain_head_seq 会与新事件碰撞）。无 head 行时回退到老逻辑。
+    let seq;
+    const headRow = await tx.query('SELECT head_seq FROM audit_heads WHERE tenant_id=?', [tenantId]);
+    if (headRow[0] != null) {
+      seq = Number(headRow[0].head_seq) + 1;
+    } else {
+      seq = last[0] ? Number(last[0].seq) + 1 : 1;
+    }
     const createdAt = nowMs();
     const hash = chainHash({
       prevHash, tenantId, action, resourceKind, resourceId, payload, createdAt,
@@ -121,7 +130,73 @@ export async function verifyChain(tenantId, { from = 1, to = null } = {}) {
     }
     expectedPrev = prev[0].hash;
   }
-  for (let i = 0; i < rows.length; i++) {
+  // V2.7：保留截断识别。from=1 且链首 seq>1 时，可能是保留策略删掉了前缀：
+  // 查找 deleted_through_seq = 首 seq-1、且 hash 与首事件 prev_hash 一致的检查点。
+  // 找到→对剩余链做截断验证（返回 truncated）；找不到→判 broken（绕过策略的删除=篡改）。
+  let truncated = null;
+  let startIdx = 0;
+  if (from === 1 && rows.length && Number(rows[0].seq) > 1) {
+    const cps = await db().query(
+      `SELECT id, seq, payload FROM audit_events
+       WHERE tenant_id=? AND action='retention.checkpoint' ORDER BY seq DESC`,
+      [tenantId]);
+    for (const cp of cps) {
+      let p;
+      try { p = JSON.parse(cp.payload); } catch { continue; }
+      if (Number(p.deleted_through_seq) === Number(rows[0].seq) - 1
+          && p.deleted_through_hash === rows[0].prev_hash) {
+        truncated = {
+          checkpoint_id: cp.id,
+          checkpoint_seq: Number(cp.seq),
+          deleted_through_seq: Number(p.deleted_through_seq),
+          deleted_count: Number(p.deleted_count) || 0,
+        };
+        break;
+      }
+      // V2.7：整链被删光时，链首就是检查点自身（seq 永不重启，见 append）。
+      // 此时 prev_hash 为 GENESIS（或删除后剩余链尾），hash 对不上已删事件是正常的，
+      // 只需确认链首确为合法的检查点事件。
+      if (cp.id === rows[0].id) {
+        truncated = {
+          checkpoint_id: cp.id,
+          checkpoint_seq: Number(cp.seq),
+          deleted_through_seq: Number(p.deleted_through_seq) || 0,
+          deleted_count: Number(p.deleted_count) || 0,
+        };
+        break;
+      }
+    }
+    if (!truncated) {
+      return {
+        ok: false, checked: 0, head: null,
+        brokenAt: {
+          seq: Number(rows[0].seq), id: rows[0].id,
+          reason: '链头部缺失且无保留检查点（可能被绕过策略删除或篡改）',
+          expected: GENESIS, actual: rows[0].prev_hash,
+        },
+      };
+    }
+    // 首事件：prev 已被策略删除（有检查点背书），只验内容 hash；后续事件正常验链。
+    const r0 = rows[0];
+    let p0;
+    try { p0 = JSON.parse(r0.payload); } catch { p0 = {}; }
+    const recomputed0 = chainHash({
+      prevHash: r0.prev_hash, tenantId: r0.tenant_id, action: r0.action,
+      resourceKind: r0.resource_kind, resourceId: r0.resource_id, payload: p0, createdAt: r0.created_at,
+    });
+    if (recomputed0 !== r0.hash) {
+      return {
+        ok: false, checked: 0, head: null,
+        brokenAt: {
+          seq: r0.seq, id: r0.id, reason: '截断后首事件内容被篡改（重算 hash 不一致）',
+          expected: recomputed0, actual: r0.hash,
+        },
+      };
+    }
+    expectedPrev = r0.hash;
+    startIdx = 1;
+  }
+  for (let i = startIdx; i < rows.length; i++) {
     const r = rows[i];
     if (r.prev_hash !== expectedPrev) {
       return {
@@ -168,15 +243,28 @@ export async function verifyChain(tenantId, { from = 1, to = null } = {}) {
       }
     }
   }
-  return { ok: true, checked: rows.length, head };
+  return { ok: true, checked: rows.length, head, truncated };
 }
 
-/** 按方言创建 append-only 触发器（幂等；迁移后调用） */
+/** 按方言创建 append-only 触发器（幂等；迁移后调用）
+ *
+ * V2.7：触发器识别保留清扫的受控绕行——
+ * - PG：事务内 `SET LOCAL deyi.retention_bypass='1'` 时允许 DELETE（retention.mjs 专用）；
+ * - SQLite：主库 retention_bypass 标记表存在行时允许 DELETE（触发器不能引用 temp 表）。
+ *   启动时清空残留标记（崩溃残留只会放行删除，不影响断链检测）。
+ * 绕行只放行 DELETE，且必须由保留清扫显式开启；UPDATE 永远拦截。
+ */
 export async function initEvidence() {
   if (db().kind === 'pg') {
     await db().exec(`
       CREATE OR REPLACE FUNCTION fn_audit_append_only() RETURNS trigger AS $$
-      BEGIN RAISE EXCEPTION 'audit_events is append-only'; END; $$ LANGUAGE plpgsql;
+      BEGIN
+        IF TG_OP = 'DELETE'
+           AND current_setting('deyi.retention_bypass', true) = '1' THEN
+          RETURN OLD; -- V2.7 保留清扫显式放行
+        END IF;
+        RAISE EXCEPTION 'audit_events is append-only';
+      END; $$ LANGUAGE plpgsql;
       DROP TRIGGER IF EXISTS trg_audit_no_update ON audit_events;
       DROP TRIGGER IF EXISTS trg_audit_no_delete ON audit_events;
       CREATE TRIGGER trg_audit_no_update BEFORE UPDATE ON audit_events
@@ -184,11 +272,23 @@ export async function initEvidence() {
       CREATE TRIGGER trg_audit_no_delete BEFORE DELETE ON audit_events
         FOR EACH ROW EXECUTE FUNCTION fn_audit_append_only();`);
   } else {
+    // SQLite：触发器不能引用 temp 表，用主库标记表做绕行开关；
+    // DROP+CREATE 保证已部署的旧触发器也能升级为保留感知版本。
+    await db().exec('CREATE TABLE IF NOT EXISTS retention_bypass(flag INTEGER)');
+    await db().exec('DELETE FROM retention_bypass'); // 清理崩溃残留的标记
+    await db().exec('DROP TRIGGER IF EXISTS trg_audit_no_update');
+    await db().exec('DROP TRIGGER IF EXISTS trg_audit_no_delete');
     await db().exec(`
-      CREATE TRIGGER IF NOT EXISTS trg_audit_no_update BEFORE UPDATE ON audit_events
-      BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
-      CREATE TRIGGER IF NOT EXISTS trg_audit_no_delete BEFORE DELETE ON audit_events
+      CREATE TRIGGER trg_audit_no_update BEFORE UPDATE ON audit_events
       BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;`);
+    await db().exec(`
+      CREATE TRIGGER trg_audit_no_delete BEFORE DELETE ON audit_events
+      BEGIN
+        SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM retention_bypass)
+          THEN RAISE(ABORT, 'audit_events is append-only')
+        END;
+      END;`);
   }
   logger.info('evidence: append-only 触发器已就绪', { backend: db().kind });
 }

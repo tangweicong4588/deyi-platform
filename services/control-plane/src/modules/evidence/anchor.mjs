@@ -100,7 +100,29 @@ export async function verifyAnchors(tenantId) {
       'SELECT id, hash FROM audit_events WHERE tenant_id=? AND seq=?',
       [tenantId, a.chain_head_seq]);
     if (!ev[0]) {
-      results.push({ id: a.id, seq: a.chain_head_seq, ok: false, reason: '锚定的链尾事件已不存在（可能被删除）' });
+      // V2.7：区分「保留策略归档」与「可疑删除」——检查点覆盖该锚定 seq 即为归档
+      // （非篡改，凭外部锚定引用追溯）；无检查点背书则仍视为异常。
+      const cps = await db().query(
+        `SELECT payload FROM audit_events
+         WHERE tenant_id=? AND action='retention.checkpoint' ORDER BY seq DESC`,
+        [tenantId]);
+      let archivedBy = null;
+      for (const cp of cps) {
+        let p;
+        try { p = JSON.parse(cp.payload); } catch { continue; }
+        if (Number(p.deleted_through_seq) >= Number(a.chain_head_seq)) { archivedBy = p; break; }
+      }
+      results.push(archivedBy
+        ? {
+            id: a.id, seq: a.chain_head_seq, ok: false, archived: true,
+            reason: '锚定事件已被保留策略归档删除（非篡改）；链上保留检查点，凭外部锚定引用追溯',
+            checkpoint: {
+              deleted_through_seq: Number(archivedBy.deleted_through_seq),
+              deleted_count: Number(archivedBy.deleted_count) || 0,
+            },
+            ref: a.ref, method: a.method,
+          }
+        : { id: a.id, seq: a.chain_head_seq, ok: false, reason: '锚定的链尾事件已不存在（可能被删除）' });
       continue;
     }
     if (ev[0].hash !== a.chain_head_hash || ev[0].id !== a.chain_head_id) {
