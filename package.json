@@ -1,1 +1,18 @@
-{"description":"得逸智行企业级 AI 交付与执行平台：自研控制面 + 开源执行底座（V0.5 可治理底座）","engines":{"node":">=22"},"name":"deyi-platform","private":true,"scripts":{"dev":"npm run dev --workspace=@deyi/control-plane","test":"npm run test --workspaces"},"type":"module","version":"0.5.0","workspaces":["services/*"]}
+{
+  "description": "得逸智行企业级 AI 交付与执行平台：自研控制面 + 开源执行底座（V0.5 可治理底座）",
+  "engines": {
+    "node": ">=22"
+  },
+  "name": "deyi-platform",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --workspace=@deyi/control-plane",
+    "test": "npm run test --workspaces"
+  },
+  "type": "module",
+  "version": "0.5.0",
+  "workspaces": [
+    "services/*",
+    "apps/*"
+  ]
+}

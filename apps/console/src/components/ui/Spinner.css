@@ -1,0 +1,10 @@
+.dy-spinner { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--color-ink-500); }
+.dy-spinner__ring {
+  width: 18px; height: 18px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary-600);
+  border-radius: 50%;
+  animation: dy-spin 0.7s linear infinite;
+}
+.dy-spinner__label { font-size: var(--font-size-sm); }
+@keyframes dy-spin { to { transform: rotate(360deg); } }

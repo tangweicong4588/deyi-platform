@@ -1,0 +1,10 @@
+.dy-alert {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-md);
+  border: 1px solid transparent;
+}
+.dy-alert--info { background: var(--color-primary-50); border-color: var(--color-primary-100); color: var(--color-primary-700); }
+.dy-alert--success { background: var(--color-success-bg); color: var(--color-success); }
+.dy-alert--warning { background: var(--color-warning-bg); color: var(--color-warning); }
+.dy-alert--danger { background: var(--color-danger-bg); border-color: #f5c6c0; color: var(--color-danger); }

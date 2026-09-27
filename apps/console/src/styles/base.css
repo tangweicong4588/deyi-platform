@@ -1,0 +1,19 @@
+/* 全局基线：只做必要的 reset，视觉由 tokens 驱动 */
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  color: var(--color-ink-900);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--color-primary-600); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button { font-family: inherit; }
+input { font-family: inherit; }
