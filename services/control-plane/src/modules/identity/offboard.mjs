@@ -49,6 +49,7 @@ const TABLE_DELETE_ORDER = [
   'plan_approvals', 'role_bindings', 'runner_runs',
   // --- 中层 ---
   'business_actions', 'ontology_terms', 'pull_requests', 'pipeline_runs', 'canonical_docs',
+  'pipeline_instances', 'pipeline_template_versions', 'pipeline_templates',
   'notify_channels', 'memories', 'repo_bindings', 'documents', 'tools',
   'business_plans', 'change_packages',
   'requirements', 'business_intents',
@@ -92,8 +93,16 @@ export function verifyConfirmToken(tenantId, token, counts) {
 export async function countOffboard(tenantId, h = db()) {
   const counts = {};
   for (const t of TABLE_DELETE_ORDER) {
+    if (t === 'pipeline_template_versions') continue; // 无 tenant_id，经模板关联统计（见下）
     const r = await h.query(`SELECT COUNT(*) AS n FROM ${t} WHERE tenant_id=?`, [tenantId]);
     counts[t] = Number(r[0]?.n || 0);
+  }
+  // pipeline_template_versions：无 tenant_id，经 pipeline_templates 关联
+  {
+    const r = await h.query(
+      `SELECT COUNT(*) AS n FROM pipeline_template_versions
+       WHERE template_id IN (SELECT id FROM pipeline_templates WHERE tenant_id=?)`, [tenantId]);
+    counts.pipeline_template_versions = Number(r[0]?.n || 0);
   }
   const ae = await h.query('SELECT COUNT(*) AS n, MAX(seq) AS max_seq FROM audit_events WHERE tenant_id=?', [tenantId]);
   counts.audit_events = Number(ae[0]?.n || 0);
@@ -193,8 +202,23 @@ export async function confirmOffboard(tenantId, confirmToken, { actorId = 'opera
   }
 
   // 2) 业务数据按拓扑序删除（projects/actors 在最后；audit_events 单独 wipe）
+  // pipeline_template_versions：无 tenant_id，经 pipeline_templates 关联删除。
+  // 必须先于 pipeline_templates（子表先删，父表后删），因此在通用循环之前显式处理。
+  {
+    const r = await db().run(
+      `DELETE FROM pipeline_template_versions
+       WHERE template_id IN (SELECT id FROM pipeline_templates WHERE tenant_id=?)`,
+      [tenantId]);
+    if (r.changes) deleted.pipeline_template_versions = r.changes;
+    const c = await db().query(
+      `SELECT COUNT(*) AS n FROM pipeline_template_versions
+       WHERE template_id IN (SELECT id FROM pipeline_templates WHERE tenant_id=?)`,
+      [tenantId]);
+    counts.pipeline_template_versions = Number(c[0]?.n || 0);
+  }
   for (const t of TABLE_DELETE_ORDER) {
     if (t === 'projects' || t === 'actors') continue;
+    if (t === 'pipeline_template_versions') continue; // 已在上方经模板关联删除
     const r = await db().run(`DELETE FROM ${t} WHERE tenant_id=?`, [tenantId]);
     if (r.changes) deleted[t] = r.changes;
   }

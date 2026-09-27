@@ -151,6 +151,39 @@ test('confirm：dryRun 后数据变化 → token 失效（快照绑定）', asyn
   await db().query('DELETE FROM actors WHERE id=?', [sneak[0].id]);
 });
 
+test('V3.1 offboard：模板/版本/实例随租户清除（FK 拓扑序）', async () => {
+  // 为 T1 铺模板数据：模板 → 2 个版本 → 变更包 → 实例 → 运行
+  await db().query(
+    `INSERT INTO requirements(id, tenant_id, project_id, title, kind, status, created_at, updated_at)
+     VALUES ('req_o1', ?, ?, 'offboard 需求', 'feature', 'ready', ?, ?)`,
+    [T1.id, t1Project.id, now, now]);
+  await db().query(
+    `INSERT INTO change_packages(id, tenant_id, project_id, requirement_id, branch, created_by, created_at, updated_at)
+     VALUES ('chg_o1', ?, ?, 'req_o1', 'feat/off', ?, ?, ?)`,
+    [T1.id, t1Project.id, t1Actor.id, now, now]);
+  await db().query(
+    `INSERT INTO pipeline_templates(id, tenant_id, project_id, name, visibility, params_schema, stages,
+       current_version, status, created_by, created_at, updated_at)
+     VALUES ('ptpl_o1', ?, ?, 'offboard 模板', 'private', '[]', '[]', 2, 'active', ?, ?, ?)`,
+    [T1.id, t1Project.id, t1Actor.id, now, now]);
+  await db().query(
+    `INSERT INTO pipeline_template_versions(id, template_id, version, definition, created_by, created_at)
+     VALUES ('ptplv_o1', 'ptpl_o1', 1, '{}', ?, ?), ('ptplv_o2', 'ptpl_o1', 2, '{}', ?, ?)`,
+    [t1Actor.id, now, t1Actor.id, now]);
+  await db().query(
+    `INSERT INTO pipeline_instances(id, tenant_id, project_id, change_package_id, template_id,
+       template_version, created_by, created_at)
+     VALUES ('ptnst_o1', ?, ?, 'chg_o1', 'ptpl_o1', 2, ?, ?)`,
+    [T1.id, t1Project.id, t1Actor.id, now]);
+  await db().query(
+    `INSERT INTO pipeline_runs(id, tenant_id, project_id, change_package_id, stage, status,
+       instance_id, template_id, template_version, created_at)
+     VALUES ('pipe_o1', ?, ?, 'chg_o1', 'facts', 'running', 'ptnst_o1', 'ptpl_o1', 2, ?)`,
+    [T1.id, t1Project.id, now]);
+  assert.equal(await count('pipeline_templates', T1.id), 1);
+  assert.equal(await count('pipeline_instances', T1.id), 1);
+});
+
 test('confirm：合法 token → 销户成功，业务数据清除、账单/锚定保留', async () => {
   const dr = await (await post(`/v1/admin/tenants/${T1.id}/offboard`, { phase: 'dryRun' })).json();
   const r = await post(`/v1/admin/tenants/${T1.id}/offboard`, { phase: 'confirm', confirm_token: dr.data.confirm_token });
@@ -161,9 +194,15 @@ test('confirm：合法 token → 销户成功，业务数据清除、账单/锚�
 
   // 业务数据不可查
   for (const t of ['actors', 'projects', 'api_keys', 'auth_sessions', 'local_credentials',
-    'memories', 'memory_links', 'model_calls', 'role_bindings', 'budgets', 'notify_channels']) {
+    'memories', 'memory_links', 'model_calls', 'role_bindings', 'budgets', 'notify_channels',
+    'pipeline_templates', 'pipeline_instances', 'pipeline_runs',
+    'change_packages', 'requirements']) {
     assert.equal(await count(t, T1.id), 0, `${t} 应被清空`);
   }
+  // pipeline_template_versions 无 tenant_id（经 template 关联），单独按模板查
+  const vers = await db().query(
+    'SELECT COUNT(*) AS n FROM pipeline_template_versions WHERE template_id=?', ['ptpl_o1']);
+  assert.equal(Number(vers[0].n), 0, 'pipeline_template_versions 应被清空');
   // 保留：账单头、锚定引用
   assert.equal(await count('billing_invoices', T1.id), 1);
   assert.equal(await count('anchors', T1.id), 1);

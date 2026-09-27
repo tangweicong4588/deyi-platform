@@ -18,6 +18,7 @@ import * as svc from './service.mjs';
 import * as pipe from './pipeline.mjs';
 import * as repo from './repo.mjs';
 import * as stp from './steps.mjs';
+import * as tpl from './templates.mjs';
 import { evaluateContract } from './contract.mjs';
 import { assemblePackage, getHandoverReport } from './handover.mjs';
 
@@ -351,6 +352,63 @@ export function registerDeliveryRoutes(app) {
       gexId: req.params.gexId, approved: !!approved, reason,
     }));
     sendJson(res, 200, { data: out });
+  });
+
+  // ---- V3.1 流水线模板与复用 ----
+  app.post(R('/delivery/pipeline-templates'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'pipeline.template.create');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pipeline_template' } });
+    const out = await withTenant(tenantId, () => tpl.createTemplate({
+      tenantId, projectId: project.id, actorId: actor.id, body: req.body || {},
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  app.get(R('/delivery/pipeline-templates'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'pipeline.template.list');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'pipeline_template' } });
+    sendJson(res, 200, { data: await tpl.listTemplates(tenantId, project.id) });
+  });
+
+  app.get(R('/delivery/pipeline-templates/:templateId'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'pipeline.template.get');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'pipeline_template' } });
+    const template = await tpl.getTemplate(tenantId, req.params.templateId);
+    sendJson(res, 200, { data: { template, versions: await tpl.listVersions(tenantId, req.params.templateId) } });
+  });
+
+  app.post(R('/delivery/pipeline-templates/:templateId/versions'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'pipeline.template.version');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pipeline_template' } });
+    const out = await withTenant(tenantId, () => tpl.createVersion({
+      tenantId, actorId: actor.id, templateId: req.params.templateId, body: req.body || {},
+    }));
+    sendJson(res, 201, { data: out });
+  });
+
+  app.post(R('/delivery/pipeline-templates/:templateId/archive'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'pipeline.template.archive');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pipeline_template' } });
+    const out = await withTenant(tenantId, () => tpl.archiveTemplate({
+      tenantId, actorId: actor.id, templateId: req.params.templateId,
+    }));
+    sendJson(res, 200, { data: out });
+  });
+
+  app.post(R('/delivery/pipeline-templates/:templateId/instantiate'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 1, 'pipeline.template.instantiate');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.write', resource: { kind: 'pipeline' } });
+    const out = await withTenant(tenantId, () => tpl.instantiate({
+      tenantId, projectId: project.id, actorId: actor.id,
+      templateId: req.params.templateId, body: req.body || {},
+    }));
+    sendJson(res, out.created ? 201 : 200, { data: out });
+  });
+
+  app.get(R('/delivery/pipeline-instances/:instanceId'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'pipeline.instance.get');
+    await policyCheck({ actor, tenantId, project, action: 'delivery.read', resource: { kind: 'pipeline' } });
+    sendJson(res, 200, { data: await tpl.getInstance(tenantId, project.id, req.params.instanceId) });
   });
 
   // ---- V1.0-C 仓库与 CI 适配 ----
