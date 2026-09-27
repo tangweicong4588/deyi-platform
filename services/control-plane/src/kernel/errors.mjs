@@ -18,6 +18,7 @@ export const Errors = {
   notFound: (msg = '不存在') => new PlatformError('NOT_FOUND', msg, { status: 404 }),
   conflict: (msg, details) => new PlatformError('CONFLICT', msg, { status: 409, details }),
   gone: (msg) => new PlatformError('GONE', msg, { status: 410 }),
+  locked: (msg = '已锁定') => new PlatformError('LOCKED', msg, { status: 423 }),
   policyDenied: (reason, details) => new PlatformError('POLICY_DENIED', `策略拒绝：${reason}`, { status: 403, details }),
   budgetExceeded: (details) => new PlatformError('BUDGET_EXCEEDED', '预算已耗尽', { status: 402, details }),
   rateLimited: (retryAfterMs, details) =>

@@ -8,9 +8,11 @@ data:
   PORT: "8080"
   HOST: "0.0.0.0"
   BOOTSTRAP_ENABLED: "false"   # 生产禁止自动 bootstrap
-  KEYCLOAK_URL: "http://keycloak:8080"
-  KEYCLOAK_REALM: "deyi"
-  KEYCLOAK_AUDIENCE: "CHANGEME_keycloak_audience"  # 生产必填：JWT aud 校验，apply 前替换
+  # 标准 OIDC Client（可选：对接客户已有 IdP；不配则只用平台本地账号登录）
+  OIDC_ISSUER: ""
+  OIDC_CLIENT_ID: ""
+  OIDC_REDIRECT_URI: ""
+  OIDC_DEFAULT_TENANT_ID: ""
   OPA_URL: "http://opa:8181"
   LITELLM_URL: "http://litellm:4000"
   QDRANT_URL: "http://qdrant:6333"

@@ -13,10 +13,10 @@
 
 ## 0. 前置：镜像与网络
 
-- [ ] `docker pull` 清单里 7 个镜像全部成功（tag 见 deploy/docker-compose.yml）。
-- [ ] 容器间 DNS 可达：control-plane 能解析 `postgres/keycloak/litellm/opa/qdrant/docling/temporal`。
-- [ ] 生产 `.env` 已填：`POSTGRES_PASSWORD / KEYCLOAK_ADMIN_PASSWORD / LITELLM_MASTER_KEY /
-  OPERATOR_TOKEN / DEFAULT_API_KEY / KEYCLOAK_AUDIENCE / AUDIT_ANCHOR_URL`，
+- [ ] `docker pull` 清单里 6 个镜像全部成功（tag 见 deploy/docker-compose.yml；V2.10 已移除 Keycloak）。
+- [ ] 容器间 DNS 可达：control-plane 能解析 `postgres/litellm/opa/qdrant/docling/temporal`。
+- [ ] 生产 `.env` 已填：`POSTGRES_PASSWORD / AUTH_JWT_SECRET / LITELLM_MASTER_KEY /
+  OPERATOR_TOKEN / DEFAULT_API_KEY / AUDIT_ANCHOR_URL`，
   无 `CHANGEME_` 残留：`grep -r CHANGEME_ .env` 为空。
 
 ## 1. PostgreSQL（真相源）
@@ -27,20 +27,26 @@
 - 坑：`DATABASE_URL` 密码含特殊字符需 URL 编码；生产 `BOOTSTRAP_ENABLED` 必须 `false`
  （否则 config 拒绝启动）。
 
-## 2. Keycloak（认证源）
+## 2. 身份（自研轻量身份服务 + 标准 OIDC Client）
 
-控制面期望（`src/modules/identity/idp.mjs`）：
-- realm 名 = `KEYCLOAK_REALM`（默认 `deyi`）；
-- JWKS：`{KEYCLOAK_URL}/realms/{realm}/protocol/openid-connect/certs`；
-- issuer：`{KEYCLOAK_URL}/realms/{realm}`；aud = `KEYCLOAK_AUDIENCE`。
+V2.10 起移除 Keycloak：平台用自研本地账号（密码+TOTP+登录锁定），
+外部身份只做标准 OIDC Relying Party，对接客户已有 IdP。
 
-- [ ] 在 Keycloak 建 realm `deyi` + client（confidential，Service Accounts Enabled），
-      client 的 Audience 含 `KEYCLOAK_AUDIENCE` 的值。
-- [ ] `curl {KEYCLOAK_URL}/realms/deyi/protocol/openid-connect/certs` 返回 JWKS（含 keys 数组）。
-- [ ] `/readyz` → `idp: keycloak(live)`。
-- [ ] 用 client_credentials 换 token，调 `$API/v1/me` 返回 200（sub 映射到 actor.external_id）。
-- 坑：`KEYCLOAK_URL` 必须是**容器内可达**地址（compose 用 `http://keycloak:8080`），
-  而签发 token 的 issuer 必须与该 URL 一致，否则验签时 iss 对不上。
+本地账号：
+- [ ] `/readyz` → `idp: local-idp`（AUTH_JWT_SECRET 已配；生产缺失会启动拒绝）。
+- [ ] 租户 admin 建用户：`POST /v1/admin/tenants/:tenantId/users` → 201。
+- [ ] `POST /v1/auth/login` → 200 返回 access/refresh；`GET /v1/me`（Bearer access）→ 200。
+- [ ] TOTP：`POST /v1/auth/totp/setup` → 扫码 → `enable`；登录必须带 `totpCode`。
+- [ ] 锁定：连续 5 次错密码 → 423，15 分钟后自动解。
+
+OIDC（可选；配了才启用）：
+- [ ] `.env` 填 `OIDC_ISSUER/CLIENT_ID/CLIENT_SECRET/REDIRECT_URI`；
+      `/readyz` → `oidc: oidc-client`。
+- [ ] `GET /v1/auth/oidc/login?tenant=<slug>` 302 跳到 IdP；回调后返回本平台会话。
+- [ ] 租户映射：IdP claims 带 `tenant_id`/`deyi_tenant`，或配 `OIDC_DEFAULT_TENANT_ID`。
+- [ ] JIT：首次登录自动建 actor（external_id = sub），审计有 `auth.oidc.jit`。
+- 坑：`OIDC_ISSUER` 必须是**控制面容器内可达**地址，且与 discovery 返回的 issuer 一致，
+  否则 ID token 的 iss 校验不通过。
 
 ## 3. LiteLLM（模型统一出口）
 

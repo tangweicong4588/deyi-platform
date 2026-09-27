@@ -10,7 +10,6 @@ resources:
   - secret.yaml
   - postgres/statefulset.yaml
   - qdrant/statefulset.yaml
-  - keycloak/deployment.yaml
   - litellm/deployment.yaml
   - opa/deployment.yaml
   - docling/deployment.yaml

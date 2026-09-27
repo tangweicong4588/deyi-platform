@@ -7,9 +7,11 @@
 # "首次部署核验清单"逐项验证（docker pull 每个镜像、端口占用、卷权限）。
 #
 # 必设环境（复制 deploy/.env.example 为 .env 后填写，全部强随机、无真值入库）：
-#   POSTGRES_PASSWORD / KEYCLOAK_ADMIN_PASSWORD / LITELLM_MASTER_KEY /
+#   POSTGRES_PASSWORD / AUTH_JWT_SECRET / LITELLM_MASTER_KEY /
 #   OPERATOR_TOKEN / DEFAULT_API_KEY（至少一个模型供应商 key）/
 #   AUDIT_ANCHOR_URL（生产必填，config 启动校验）
+# 可选：OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URI
+#   （对接客户已有 IdP；不配则只用平台本地账号登录）
 
 name: deyi-platform
 
@@ -40,25 +42,6 @@ services:
       - "6333:6333"
     # 健康由控制面启动探测（probeVector）+ /readyz adapters.vector 上报，
     # 镜像内无 curl，不在此处加 healthcheck。
-
-  # ---------- 身份（认证源；授权归平台） ----------
-  keycloak:
-    image: quay.io/keycloak/keycloak:25.0.6  # 已核验：quay 存在（2026-09-26）
-    restart: unless-stopped
-    command: start
-    environment:
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/deyi
-      KC_DB_USERNAME: deyi
-      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?必须设置}
-      KC_HOSTNAME_STRICT: "false"
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?必须设置}
-    ports:
-      - "8081:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   # ---------- 模型统一出口 ----------
   litellm:
@@ -121,8 +104,12 @@ services:
       BOOTSTRAP_ENABLED: "false"  # 生产禁止自动 bootstrap
       DATABASE_URL: postgres://deyi:${POSTGRES_PASSWORD:?必须设置}@postgres:5432/deyi
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:?必须设置}
-      KEYCLOAK_URL: http://keycloak:8080
-      KEYCLOAK_REALM: deyi
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?必须设置}  # V2.10：自研身份 JWT 签名密钥
+      OIDC_ISSUER: ${OIDC_ISSUER:-}  # 可选：标准 OIDC Client，对接客户已有 IdP
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      OIDC_DEFAULT_TENANT_ID: ${OIDC_DEFAULT_TENANT_ID:-}
       OPA_URL: http://opa:8181
       LITELLM_URL: http://litellm:4000
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?必须设置}

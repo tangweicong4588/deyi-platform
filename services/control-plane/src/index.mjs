@@ -9,6 +9,7 @@ import { openDb, db } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
 import { maybeBootstrap } from './modules/identity/bootstrap.mjs';
 import { registerIdentityRoutes } from './modules/identity/routes.mjs';
+import { registerAuthRoutes } from './modules/identity/auth-routes.mjs';
 import { registerGatewayRoutes } from './modules/gateway/routes.mjs';
 import { ensureSeedModels } from './modules/gateway/store.mjs';
 import { registerKnowledgeRoutes } from './modules/knowledge/routes.mjs';
@@ -40,7 +41,8 @@ function adapterStatus() {
   // 各引擎适配器状态：live（已接开源组件）/ fallback（内置降级，仅开发容忍）
   return {
     database: config.DATABASE_URL ? 'postgresql(live)' : 'sqlite(fallback)',
-    idp: config.KEYCLOAK_URL ? 'keycloak(live)' : (config.DEV_IDP_SECRET ? 'dev-idp(fallback)' : 'none'),
+    idp: (config.AUTH_JWT_SECRET || config.DEV_IDP_SECRET) ? 'local-idp' : 'none',
+    oidc: (config.OIDC_ISSUER && config.OIDC_CLIENT_ID) ? 'oidc-client' : 'none',
     policy: isOpaEnabled() ? 'opa(live)' : 'builtin(fallback)',
     model_gateway: config.LITELLM_URL ? 'litellm(live)' : (config.allowDirectProvider ? 'direct(fallback)' : 'none'),
     vector: getVectorStatus(),
@@ -82,6 +84,7 @@ async function main() {
   });
 
   registerIdentityRoutes(app);
+  registerAuthRoutes(app);
   registerGatewayRoutes(app);
   registerKnowledgeRoutes(app);
   registerOntologyRoutes(app);

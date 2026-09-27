@@ -1,7 +1,7 @@
 /**
  * modules/identity/middleware.mjs —— 认证与鉴权中间件。
  *
- * 认证顺序：OPERATOR_TOKEN（平台运维）→ dyk_ API Key → JWT（Keycloak/开发 IdP）。
+ * 认证顺序：OPERATOR_TOKEN（平台运维）→ dyk_ API Key → JWT（本地身份服务签发）。
  * 上下文 tenantId/actorId 只从凭证派生；requireRole 只认 role_bindings。
  */
 import { runWithContext, ctx } from '../../kernel/context.mjs';
@@ -30,7 +30,7 @@ async function fromJwt(token) {
   const idp = getIdP();
   if (!idp) throw Errors.unauthorized('JWT 登录未配置');
   const claims = await idp.verifyJwt(token);
-  // 租户：优先 claims 里的 tenant_id，回退按 slug 找（Keycloak 场景由运维映射）
+  // 租户：优先 claims 里的 tenant_id，回退按 slug 找
   let tenant = null;
   if (claims.tenant_id) tenant = await getTenant(claims.tenant_id).catch(() => null);
   if (!tenant) throw Errors.unauthorized('JWT 未绑定有效租户');

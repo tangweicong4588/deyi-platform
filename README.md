@@ -10,7 +10,7 @@ trace/审计/成本，全链路可归属、可阻断）。
 
 | 平面 | 自研（本仓库） | 开源底座（适配层接入） |
 |---|---|---|
-| 体验与控制面 | 租户/项目/任务模板/审批/预算/产物合同 | Keycloak（身份）、Temporal（工作流） |
+| 体验与控制面 | 租户/项目/任务模板/审批/预算/产物合同 | 自研身份服务（密码+TOTP+OIDC Client）、Temporal（工作流） |
 | 知识与本体面 | CanonicalDoc、Fact 版本链、权限过滤、本体评审发布 | Docling、LlamaIndex、Qdrant、Mem0+Graphiti、PostgreSQL |
 | 编排与策略面 | 策略决策、MCP 网关（注册/分级/审批/幂等） | LiteLLM（模型出口）、LangGraph、OPA |
 | 执行与证据面 | 审计哈希链、成本账本、证据包 | 隔离 Runner、Gitea Actions、Langfuse、OTel |

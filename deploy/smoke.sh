@@ -43,7 +43,7 @@ require_live() { # $1=key $2=期望值
   else warn "adapters.$1=$v（期望 $2）"; fi
 }
 require_live database "postgresql(live)"
-require_live idp "keycloak(live)"
+require_live idp "local-idp"
 require_live model_gateway "litellm(live)"
 require_live vector "qdrant(live)"
 require_live audit_anchor "configured"

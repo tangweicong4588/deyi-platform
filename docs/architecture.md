@@ -37,7 +37,7 @@
 
 | 能力 | 自研（本仓库） | 复用（适配层） | 说明 |
 |---|---|---|---|
-| 租户/项目/主体/Key/RBAC | ✅ | Keycloak（身份源） | Keycloak 只做认证，授权（RBAC/策略）归平台 |
+| 租户/项目/主体/Key/RBAC | ✅ | 自研身份服务（本地账号+TOTP；可选标准 OIDC Client 对接客户 IdP） | 平台只做 Relying Party，不自研 OIDC Provider；授权（RBAC/策略）归平台 |
 | 策略决策 | ✅ 默认策略语义 | OPA（决策引擎） | Rego 包与内置引擎语义一致，可热插拔 |
 | 模型网关治理 | ✅ 身份映射/预算/计量/熔断 | LiteLLM（统一出口） | 平台签发虚拟 key，不直接暴露 Provider key |
 | 知识入库/检索策略 | ✅ CanonicalDoc/ACL预过滤/证据血缘 | Docling / LlamaIndex / Qdrant | Qdrant 只存派生索引，可重建 |

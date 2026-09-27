@@ -15,11 +15,17 @@ const DEF = {
   BOOTSTRAP_ENABLED: 'false',
   BOOTSTRAP_TENANT_NAME: 'default',
   BOOTSTRAP_ADMIN_NAME: 'admin',
-  DEV_IDP_SECRET: '',        // 开发模式内置 IdP 的 HMAC 密钥（生产禁止）
+  DEV_IDP_SECRET: '',        // 开发/测试：本地身份 JWT 的 HMAC 密钥（生产禁止）
+  AUTH_JWT_SECRET: '',       // 生产：本地身份 JWT 的 HMAC 密钥（生产必填）
   OPERATOR_TOKEN: '',         // 平台运维 token（租户 CRUD）；生产由运维显式设置
-  KEYCLOAK_URL: '',          // 设了就走 Keycloak OIDC
-  KEYCLOAK_REALM: 'deyi',
-  KEYCLOAK_AUDIENCE: '',     // JWT aud 期望值（生产必填，防受众混淆）
+  // 标准 OIDC Client（对接客户已有 IdP；可选，未配则只用本地账号登录）
+  OIDC_ISSUER: '',
+  OIDC_CLIENT_ID: '',
+  OIDC_CLIENT_SECRET: '',
+  OIDC_REDIRECT_URI: '',
+  OIDC_DEFAULT_TENANT_ID: '',
+  OIDC_SCOPES: 'openid profile email',
+  OIDC_TOTP_ISSUER: 'Deyi',  // TOTP otpauth URL 里的 issuer 显示名
   API_KEY_PEPPER: '',        // API Key hash 的服务端 pepper（生产建议设置）
   // 轮换方法：新 pepper → API_KEY_PEPPER；旧 pepper 移入 _PREVIOUS（逗号分隔），
   // 旧 key 在过渡期内仍可校验；确认全部轮换/过期后再从 _PREVIOUS 移除
@@ -63,10 +69,9 @@ function load() {
   const prodWarnings = [];
   if (cfg.isProd) {
     if (!cfg.DATABASE_URL) missing.push('DATABASE_URL（生产必须 PostgreSQL）');
-    // 生产必须走 Keycloak，且禁止内置开发 IdP（H-1 安全 review：原来只设 DEV_IDP_SECRET 也能通过）
-    if (!cfg.KEYCLOAK_URL) missing.push('KEYCLOAK_URL（生产必须 Keycloak OIDC）');
-    if (cfg.DEV_IDP_SECRET) missing.push('DEV_IDP_SECRET（生产禁止内置 IdP）');
-    if (!cfg.KEYCLOAK_AUDIENCE) missing.push('KEYCLOAK_AUDIENCE（生产 JWT 受众校验必须配置）');
+    // V2.10：自研轻量身份服务（替代 Keycloak）；生产必须配置 AUTH_JWT_SECRET，禁止开发密钥
+    if (!cfg.AUTH_JWT_SECRET) missing.push('AUTH_JWT_SECRET（生产 JWT 签名密钥必须配置）');
+    if (cfg.DEV_IDP_SECRET) missing.push('DEV_IDP_SECRET（生产禁止开发密钥）');
     if (!cfg.OPERATOR_TOKEN) missing.push('OPERATOR_TOKEN（生产平台运维必须显式设置）');
     if (!cfg.LITELLM_URL && !cfg.allowDirectProvider) {
       missing.push('LITELLM_URL（生产模型出口必须走 LiteLLM，或显式 ALLOW_DIRECT_PROVIDER=true）');

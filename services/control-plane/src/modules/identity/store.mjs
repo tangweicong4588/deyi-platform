@@ -84,6 +84,13 @@ export const getTenant = async (id, h = db()) => {
   return rows[0] || null;
 };
 
+/** V2.10：按 slug 解析租户（登录/OIDC 租户映射用）。 */
+export const getTenantBySlug = async (slug, h = db()) => {
+  if (typeof slug !== 'string' || !slug) return null;
+  const rows = await h.query('SELECT * FROM tenants WHERE slug=?', [slugify(slug)]);
+  return rows[0] ? T(rows[0]) : null;
+};
+
 export const listTenants = async () =>
   (await db().query('SELECT * FROM tenants ORDER BY created_at')).map(T);
 

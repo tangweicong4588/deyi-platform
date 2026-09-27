@@ -2,7 +2,7 @@
 
 ## 1. 启动顺序
 
-Docker Compose 已通过 `depends_on` 保证：`postgres(healthy)` → `keycloak/temporal/control-plane`。
+Docker Compose 已通过 `depends_on` 保证：`postgres(healthy)` → `temporal/control-plane`。
 K8s 用 `initContainers` 等 postgres 5432 就绪。控制面启动时会主动探测各适配器，
 单个引擎不可用**不阻塞启动**（降级 + `/readyz` 上报），只有 DB 不可达会 503。
 
@@ -20,7 +20,7 @@ kubectl -n deyi logs -l app=control-plane --tail=50
 ## 2. /readyz adapters 状态解读
 
 `curl http://<host>:8080/readyz` 返回 `adapters` 对象，见 `deploy/README.md` 的对照表。
-生产红线：`database` 必须 `postgresql(live)`；`idp` 必须 `keycloak(live)`；
+生产红线：`database` 必须 `postgresql(live)`；`idp` 必须 `local-idp`（AUTH_JWT_SECRET 已配，生产缺失会启动拒绝）；
 `model_gateway` 必须 `litellm(live)`；`vector` 必须 `qdrant(live)`；
 `audit_anchor` 不能是 `none(本地哈希链)`。任一红线不满足 → 按第 4 节排查，
 不要先让业务流量进来。
@@ -32,7 +32,7 @@ kubectl -n deyi logs -l app=control-plane --tail=50
   k8s：`kubectl -n deyi logs -l app=control-plane -f`。
 - 网关调用：`msg="gateway chat"` 行含 `model/via/engine/tokens/cost_cents`。
 - LiteLLM：`docker compose logs -f litellm`（上游 4xx/5xx 先看这里）。
-- Keycloak：管理后台 http://宿主机:8081（admin / KEYCLOAK_ADMIN_PASSWORD）。
+- 身份：本地账号登录 `POST /v1/auth/login`；TOTP 与 OIDC 见《集成清单》第 2 节。
 
 ## 4. 常见故障
 
@@ -57,9 +57,10 @@ kubectl -n deyi logs -l app=control-plane --tail=50
 正常熔断。查 `GET /v1/admin/tenants/:tenantId/budgets`（租户 admin），
 调大 `costLimitCents`：`PUT /v1/admin/tenants/:tenantId/budgets`。
 
-### Keycloak 登录失败
-1. realm 是否为 `deyi`（KEYCLOAK_REALM），client 是否配好。
-2. `adapters.idp` 若为 `dev-idp(fallback)`/`none`：生产不允许，检查 KEYCLOAK_URL。
+### 本地账号登录失败
+1. `POST /v1/auth/login` 返回 423：15 分钟内失败 5 次被临时锁定，等 15 分钟或查 `login_attempts` 表确认。
+2. `adapters.idp` 为 `none`：未配置 AUTH_JWT_SECRET（生产启动会直接拒绝）。
+3. OIDC 回调 401：检查 OIDC_ISSUER/CLIENT_ID/SECRET 与 claims 租户映射（`tenant_id`/`deyi_tenant` 或 OIDC_DEFAULT_TENANT_ID）。
 
 ### OPA 不可用
 控制面自动 fail-closed 拒绝（策略安全）。查 `curl http://<opa-host>:8181/health`，
