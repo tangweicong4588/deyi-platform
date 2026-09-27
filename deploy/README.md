@@ -54,6 +54,17 @@ curl http://localhost:8080/readyz | python3 -m json.tool
 
 `/healthz` 只表示进程存活；`/readyz` 503 表示 DB 不可达。
 
+V2.11 起 `/readyz` 新增 `checks` 字段（每次请求 live 探测，适配器结果缓存 10s）：
+
+| `checks.<name>.status` | 含义 |
+|---|---|
+| `up` | 已配置且 ping 通（含 DB 可写探测） |
+| `down` | 已配置但 ping 不通；只上报，**不阻塞 ready**（平台有内置 fallback，K8s 不会因此踢出副本） |
+| `unknown` | 未配置该依赖；**不阻塞 ready** |
+
+- `checks.database` 是 DB **可写**探测（`readiness_probe` 单行 upsert），不是 `SELECT 1`；DB 只读/断开 → 503。
+- `ready` 只由 DB 可写探测决定；适配器 `down`/`unknown` 永远只影响 `checks` 内容，不改变 HTTP 状态码。
+
 ### 首次部署核验清单（必须执行）
 
 ```bash

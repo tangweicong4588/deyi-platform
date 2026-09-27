@@ -3,7 +3,7 @@
  */
 import { config } from './kernel/config.mjs';
 import { logger, setLogContextProvider } from './kernel/logging.mjs';
-import { createApp, sendJson } from './kernel/http.mjs';
+import { createApp } from './kernel/http.mjs';
 import { ctx } from './kernel/context.mjs';
 import { openDb, db } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
@@ -24,36 +24,16 @@ import { registerBillingRoutes } from './modules/billing/routes.mjs';
 import { registerOpenApiRoutes } from './modules/openapi/routes.mjs';
 import { initEvidence } from './modules/evidence/audit.mjs';
 import { tracingMiddleware, isTracingEnabled } from './kernel/tracing.mjs';
-import { probeVector, getVectorStatus } from './modules/knowledge/vector.mjs';
-import { probeDocParse, getDocParseStatus } from './modules/knowledge/docling.mjs';
-import { probeTemporal, getWorkflowStatus } from './modules/execution/temporal.mjs';
-import { getRepoAdapterStatus } from './adapters/gitea/client.mjs';
-import { getPipelineAdapterStatus } from './adapters/pipeline/adapter.mjs';
-import { isOpaEnabled } from './modules/policy/opa.mjs';
+import { probeVector } from './modules/knowledge/vector.mjs';
+import { probeDocParse } from './modules/knowledge/docling.mjs';
+import { probeTemporal } from './modules/execution/temporal.mjs';
+import { registerHealthRoutes, adapterSummary } from './kernel/health.mjs';
 import { getIdP } from './modules/identity/idp.mjs';
 
 setLogContextProvider(() => {
   const c = ctx();
   return c.traceId ? { trace_id: c.traceId, tenant_id: c.tenantId, actor_id: c.actorId } : {};
 });
-
-function adapterStatus() {
-  // 各引擎适配器状态：live（已接开源组件）/ fallback（内置降级，仅开发容忍）
-  return {
-    database: config.DATABASE_URL ? 'postgresql(live)' : 'sqlite(fallback)',
-    idp: (config.AUTH_JWT_SECRET || config.DEV_IDP_SECRET) ? 'local-idp' : 'none',
-    oidc: (config.OIDC_ISSUER && config.OIDC_CLIENT_ID) ? 'oidc-client' : 'none',
-    policy: isOpaEnabled() ? 'opa(live)' : 'builtin(fallback)',
-    model_gateway: config.LITELLM_URL ? 'litellm(live)' : (config.allowDirectProvider ? 'direct(fallback)' : 'none'),
-    vector: getVectorStatus(),
-    doc_parse: getDocParseStatus(),
-    workflow: getWorkflowStatus(),
-    repo: getRepoAdapterStatus(),
-    ci: getPipelineAdapterStatus(),
-    audit_anchor: config.AUDIT_ANCHOR_URL ? 'configured' : 'none(本地哈希链)',
-    tracing: isTracingEnabled() ? 'otlp(live)' : 'noop',
-  };
-}
 
 async function main() {
   logger.info('control-plane starting', { env: config.DEYI_ENV, version: '0.5.0' });
@@ -73,15 +53,7 @@ async function main() {
   app.use(tracingMiddleware); // http.server span；无 OTEL 端点时 no-op
   logger.info('tracing', { otlp: isTracingEnabled() ? 'enabled' : 'disabled(no-op)' });
 
-  app.get('/healthz', async (req, res) => sendJson(res, 200, { status: 'ok' }));
-  app.get('/readyz', async (req, res) => {
-    try {
-      await db().query('SELECT 1');
-      sendJson(res, 200, { status: 'ready', adapters: adapterStatus() });
-    } catch (e) {
-      sendJson(res, 503, { status: 'not-ready', error: 'db unreachable' });
-    }
-  });
+  registerHealthRoutes(app); // V2.11：/healthz 轻量存活，/readyz DB 可写探测 + 适配器 ping
 
   registerIdentityRoutes(app);
   registerAuthRoutes(app);
@@ -99,7 +71,7 @@ async function main() {
   const server = await app.listen(config.PORT, config.HOST);
   logger.info('control-plane listening', {
     addr: `http://${config.HOST}:${config.PORT}`,
-    adapters: adapterStatus(),
+    adapters: { ...adapterSummary(), tracing: isTracingEnabled() ? 'otlp(live)' : 'noop' },
   });
 
   const shutdown = () => {
