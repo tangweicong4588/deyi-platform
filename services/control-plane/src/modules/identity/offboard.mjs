@@ -57,6 +57,7 @@ const TABLE_DELETE_ORDER = [
   'release_steps', 'releases', 'deploy_environments',
   'agent_run_steps', 'agent_approvals', 'agent_runs', 'agent_versions', 'agents',
   'agent_template_instances', 'agent_templates',
+  'ai_assist_runs',
   'notify_channels', 'memories', 'repo_bindings', 'documents', 'tools',
   'business_plans', 'change_packages',
   'requirements', 'business_intents',

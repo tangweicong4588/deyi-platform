@@ -68,11 +68,11 @@ const call = (method, url, key, body) => fetch(url, {
   body: body === undefined ? undefined : JSON.stringify(body),
 }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
 
-test('模板市场：3 个内置模板，category 可过滤', async () => {
+test('模板市场：内置模板齐全，category 可过滤', async () => {
   const { status, body } = await call('GET', `${pj(pA1.id)}/agent-templates`, adminKeyA);
   assert.equal(status, 200);
   const keys = body.data.map((t) => t.key).sort();
-  assert.deepEqual(keys, ['customer-service', 'data-analysis', 'doc-review']);
+  assert.deepEqual(keys, ['change-risk', 'code-review', 'customer-service', 'data-analysis', 'doc-review', 'testgen']);
   assert.ok(body.data.every((t) => t.builtin === true));
   const { body: b2 } = await call('GET', `${pj(pA1.id)}/agent-templates?category=support`, adminKeyA);
   assert.deepEqual(b2.data.map((t) => t.key), ['customer-service']);

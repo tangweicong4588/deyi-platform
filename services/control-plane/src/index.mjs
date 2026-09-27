@@ -22,6 +22,7 @@ import { registerTaskRoutes } from './modules/tasks/routes.mjs';
 import { registerReleaseRoutes } from './modules/release/routes.mjs';
 import { registerAgentRoutes } from './modules/agents/routes.mjs';
 import { registerAgentTemplateRoutes } from './modules/agent_templates/routes.mjs';
+import { registerDevAssistRoutes } from './modules/dev_assist/routes.mjs';
 import { registerNotifyRoutes } from './modules/notify/routes.mjs';
 import { registerMemoryRoutes } from './modules/memory/routes.mjs';
 import { registerBillingRoutes } from './modules/billing/routes.mjs';
@@ -75,6 +76,7 @@ async function main() {
   registerReleaseRoutes(app);
   registerAgentRoutes(app);
   registerAgentTemplateRoutes(app);
+  registerDevAssistRoutes(app);
   registerNotifyRoutes(app);
   registerMemoryRoutes(app);
   registerBillingRoutes(app);

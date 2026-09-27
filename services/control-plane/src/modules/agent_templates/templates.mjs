@@ -17,7 +17,7 @@ import { validateParamsSchema, resolveParams } from '../delivery/templates.mjs';
 import { registerAgent, createAgentVersion } from '../agents/agents.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
 
-export const TEMPLATE_CATEGORIES = new Set(['support', 'review', 'analytics', 'custom']);
+export const TEMPLATE_CATEGORIES = new Set(['support', 'review', 'analytics', 'dev', 'custom']);
 const KEY_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const PLACEHOLDER_RE = /\[\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\]/g;
 const PLACEHOLDER_ONLY_RE = /^\[\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\]$/;
@@ -160,6 +160,83 @@ const BUILTINS = [
         {
           id: 'summarize', type: 'llm', name: '输出摘要', model: '[[model]]',
           prompt: '请将以下分析结果整理成一份简洁的中文摘要，包含关键结论。分析结果：{{steps.analyze.text}}',
+          next: null,
+        },
+      ],
+    },
+  },
+  {
+    id: 'agt_builtin_code_review',
+    key: 'code-review',
+    name: '代码评审',
+    description: 'AI 代码评审 Agent：分析代码变更 → 输出中文评审报告（含严重级别与修改建议）。',
+    category: 'dev',
+    params_schema: [
+      { name: 'strictness', type: 'enum', options: ['宽松', '标准', '严格'], default: '标准', description: '评审严格程度' },
+      { name: 'model', type: 'string', default: 'deyi-default', description: 'LLM 模型（网关模型名）' },
+    ],
+    definition_template: {
+      entry: 'analyze',
+      nodes: [
+        {
+          id: 'analyze', type: 'llm', name: '分析变更', model: '[[model]]',
+          prompt: '你是资深代码评审专家，评审严格程度：[[strictness]]。请分析以下代码变更，找出 bug、坏味道、安全问题与可维护性问题。变更内容：{{input.diff}}。变更背景：{{input.context}}',
+          next: 'report',
+        },
+        {
+          id: 'report', type: 'llm', name: '输出评审报告', model: '[[model]]',
+          prompt: '请将以下代码分析整理成中文评审报告：问题列表（含严重级别：阻塞/严重/建议）、每条问题的修改建议、总体结论。分析内容：{{steps.analyze.text}}',
+          next: null,
+        },
+      ],
+    },
+  },
+  {
+    id: 'agt_builtin_testgen',
+    key: 'testgen',
+    name: '测试用例生成',
+    description: 'AI 测试用例生成 Agent：设计测试策略 → 输出具体测试用例。',
+    category: 'dev',
+    params_schema: [
+      { name: 'framework', type: 'string', default: 'node:test', description: '测试框架' },
+      { name: 'model', type: 'string', default: 'deyi-default', description: 'LLM 模型（网关模型名）' },
+    ],
+    definition_template: {
+      entry: 'design',
+      nodes: [
+        {
+          id: 'design', type: 'llm', name: '设计测试策略', model: '[[model]]',
+          prompt: '你是测试专家。请为以下代码变更设计测试策略（测试框架：[[framework]]），覆盖正常路径、边界条件与异常路径。变更内容：{{input.diff}}。变更背景：{{input.context}}',
+          next: 'cases',
+        },
+        {
+          id: 'cases', type: 'llm', name: '输出测试用例', model: '[[model]]',
+          prompt: '请根据以下测试策略输出具体测试用例，每条用例包含：用例名、前置条件、测试步骤、预期结果。测试策略：{{steps.design.text}}',
+          next: null,
+        },
+      ],
+    },
+  },
+  {
+    id: 'agt_builtin_change_risk',
+    key: 'change-risk',
+    name: '变更风险评估',
+    description: 'AI 变更风险评估 Agent：评估变更风险 → 输出风险等级、依据与缓解建议。',
+    category: 'dev',
+    params_schema: [
+      { name: 'model', type: 'string', default: 'deyi-default', description: 'LLM 模型（网关模型名）' },
+    ],
+    definition_template: {
+      entry: 'assess',
+      nodes: [
+        {
+          id: 'assess', type: 'llm', name: '评估风险', model: '[[model]]',
+          prompt: '你是变更风险评估专家。请评估以下代码变更的风险：影响范围、回滚难度、数据风险、依赖风险。变更内容：{{input.diff}}。变更背景：{{input.context}}',
+          next: 'summary',
+        },
+        {
+          id: 'summary', type: 'llm', name: '输出评估结论', model: '[[model]]',
+          prompt: '请根据以下风险评估输出结论：风险等级（高/中/低）、评级依据、缓解建议。风险评估：{{steps.assess.text}}',
           next: null,
         },
       ],
