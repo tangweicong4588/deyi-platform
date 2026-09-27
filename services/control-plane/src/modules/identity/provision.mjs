@@ -18,10 +18,8 @@ export async function provisionTenant({
 } = {}) {
   if (!name) throw Errors.badRequest('name 必填');
   return db().transaction(async (tx) => {
+    // V2.8：createTenant 内部已落套餐预算（幂等；手工预算行优先，不覆盖），此处不再重复调用
     const tenant = await createTenant({ name, slug, plan, quotas }, tx);
-    // V2.6：套餐配额落地为当月预算行（幂等；手工预算行优先，不覆盖）
-    const gw = await import('../gateway/store.mjs');
-    await gw.ensurePlanBudget(tenant.id, tx);
     const project = await createProject(tenant.id, { name: projectName }, tx);
     const actor = await createActor(tenant.id, { kind: 'user', name: adminName, email: adminEmail }, tx);
     await bindRole(tenant.id, actor.id, null, 'admin', tx);

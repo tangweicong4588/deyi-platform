@@ -29,6 +29,10 @@ export async function createTenant({ name, slug, plan = 'trial', quotas = {} }, 
     if (String(e.message).includes('UNIQUE')) throw Errors.conflict(`租户 slug 已存在: ${slug}`);
     throw e;
   }
+  // V2.8：开通即落套餐预算——所有创建入口（直调路由/provision/bootstrap）统一经此，
+  // 不再依赖调用方记得调 ensurePlanBudget（动态 import 避免 identity↔gateway 循环依赖）
+  const gw = await import('../gateway/store.mjs');
+  await gw.ensurePlanBudget(row.id, h);
   return { ...row, quotas: quotas || {} };
 }
 

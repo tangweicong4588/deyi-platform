@@ -18,6 +18,7 @@ const { openDb, db } = await import('../src/db/index.mjs');
 const { migrate } = await import('../src/db/migrate.mjs');
 const store = await import('../src/modules/identity/store.mjs');
 const { provisionTenant } = await import('../src/modules/identity/provision.mjs');
+const gstore = await import('../src/modules/gateway/store.mjs');
 const { createApp } = await import('../src/kernel/http.mjs');
 const { registerIdentityRoutes } = await import('../src/modules/identity/routes.mjs');
 
@@ -158,4 +159,40 @@ test('非法套餐被拒绝；suspend 状态机', async () => {
   // 格式合法但不存在的 ID → 404
   const ghost = await req('POST', '/v1/admin/tenants/ten_00000000000000000000000000/suspend', {});
   assert.equal(ghost.status, 404);
+});
+
+test('V2.8：直调 POST /v1/admin/tenants 也落套餐预算（与 provision 一致）', async () => {
+  const { status, json } = await req('POST', '/v1/admin/tenants', { name: 'Direct Corp', plan: 'trial' });
+  assert.equal(status, 201);
+  const rows = await gstore.listBudgets(json.data.id);
+  const planRow = rows.find((b) => b.source === 'plan' && b.period_key === gstore.currentPeriodKey() && !b.project_id);
+  assert.ok(planRow, '直调创建的租户应有 plan 预算行');
+  assert.equal(planRow.token_limit, 1_000_000, 'trial 套餐 token 上限');
+
+  // quotas 覆盖生效
+  const q = await req('POST', '/v1/admin/tenants',
+    { name: 'Direct Quota', plan: 'trial', quotas: { tokens_per_month: 5000 } });
+  assert.equal(q.status, 201);
+  const qrow = (await gstore.listBudgets(q.json.data.id)).find((b) => b.source === 'plan' && !b.project_id);
+  assert.equal(qrow.token_limit, 5000, 'quotas 覆盖应体现在预算行');
+
+  // enterprise 不落 plan 行（不限）
+  const e = await req('POST', '/v1/admin/tenants', { name: 'Direct Ent', plan: 'enterprise' });
+  assert.equal(e.status, 201);
+  const erows = await gstore.listBudgets(e.json.data.id);
+  assert.equal(erows.filter((b) => b.source === 'plan').length, 0, 'enterprise 不落 plan 预算行');
+});
+
+test('V2.8：store.createTenant 直调也落预算（覆盖 bootstrap 路径语义）', async () => {
+  const t = await store.createTenant({ name: 'Store Direct' });
+  const rows = await gstore.listBudgets(t.id);
+  assert.ok(rows.some((b) => b.source === 'plan' && b.period_key === gstore.currentPeriodKey()),
+    'store 直调应落 plan 预算行');
+});
+
+test('V2.8：provision 不重复落预算行（当月租户级 plan 行恰好一条）', async () => {
+  const out = await provisionTenant({ name: 'No Dup Budget', plan: 'trial', adminName: 'nd-admin' });
+  const rows = (await gstore.listBudgets(out.tenant.id))
+    .filter((b) => b.source === 'plan' && b.period_key === gstore.currentPeriodKey() && !b.project_id);
+  assert.equal(rows.length, 1, '当月租户级 plan 行应恰好一条');
 });
