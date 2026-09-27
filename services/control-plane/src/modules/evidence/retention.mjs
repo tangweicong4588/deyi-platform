@@ -9,6 +9,7 @@
  *   retention_days_model_calls       默认 180（网关计量明细；账单/预算汇总不受影响）
  *   retention_days_notify_deliveries 默认 90（只删终态 sent/failed/skipped，queued 保留）
  *   retention_days_usage_outbox      默认 30（只删已处理 processed_at 非空）
+ *   retention_days_artifacts         默认 365（制品版本；pinned/被 release 关联的不删；包级 retention_days 可覆盖）
  *   retention_audit_include_anchored 默认 false（审计事件保留是否包含已被锚定覆盖的旧事件）
  *
  * 审计链安全删除（核心设计）：
@@ -35,12 +36,14 @@ import { newTraceId } from '../../kernel/context.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { append, tryAudit } from './audit.mjs';
 import { getTenant } from '../identity/store.mjs';
+import { sweepArtifactVersions } from '../artifacts/store.mjs';
 
 export const RETENTION_DEFAULTS = {
   audit_events_days: 730,
   model_calls_days: 180,
   notify_deliveries_days: 90,
   usage_outbox_days: 30,
+  artifacts_days: 365,
 };
 
 const DAY_MS = 86400_000;
@@ -84,6 +87,7 @@ export function getRetentionPolicy(tenant) {
     model_calls_days: pickDays('retention_days_model_calls', RETENTION_DEFAULTS.model_calls_days),
     notify_deliveries_days: pickDays('retention_days_notify_deliveries', RETENTION_DEFAULTS.notify_deliveries_days),
     usage_outbox_days: pickDays('retention_days_usage_outbox', RETENTION_DEFAULTS.usage_outbox_days),
+    artifacts_days: pickDays('retention_days_artifacts', RETENTION_DEFAULTS.artifacts_days),
     audit_include_anchored: over.retention_audit_include_anchored === true,
   };
 }
@@ -216,7 +220,7 @@ export async function sweepTenant(tenantId, { dryRun = false } = {}) {
   if (!tenant) throw Errors.notFound('租户不存在');
   const policy = getRetentionPolicy(tenant);
   const now = nowMs();
-  const deleted = { audit_events: 0, model_calls: 0, notify_deliveries: 0, usage_outbox: 0 };
+  const deleted = { audit_events: 0, model_calls: 0, notify_deliveries: 0, usage_outbox: 0, artifacts: 0 };
   let checkpoint = null;
 
   const mcCut = now - policy.model_calls_days * DAY_MS;
@@ -233,6 +237,8 @@ export async function sweepTenant(tenantId, { dryRun = false } = {}) {
     // 审计事件 dry-run：只做前缀计数，不写检查点
     const pre = await findDeletableAuditPrefix(tenantId, aCut, policy.audit_include_anchored);
     deleted.audit_events = pre.count;
+    // V3.3：制品版本 dry-run（pinned/被 release 关联的不计入）
+    deleted.artifacts = (await sweepArtifactVersions(tenantId, { days: policy.artifacts_days, dryRun: true })).deleted;
   } else {
     deleted.model_calls = await deleteBatched('model_calls', 'tenant_id=? AND created_at<=?', [tenantId, mcCut]);
     deleted.notify_deliveries = await deleteBatched(
@@ -241,6 +247,9 @@ export async function sweepTenant(tenantId, { dryRun = false } = {}) {
       'gateway_usage_outbox', 'tenant_id=? AND processed_at IS NOT NULL AND processed_at<=?', [tenantId, uoCut]);
     checkpoint = await sweepAuditEvents(tenantId, aCut, policy.audit_include_anchored);
     deleted.audit_events = checkpoint?.deleted_count || 0;
+    // V3.3：制品版本清扫（pinned/被 release 关联的保留）
+    const artSweep = await sweepArtifactVersions(tenantId, { days: policy.artifacts_days });
+    deleted.artifacts = artSweep.deleted;
     await tryAudit({
       tenantId,
       actorId: 'system:retention',

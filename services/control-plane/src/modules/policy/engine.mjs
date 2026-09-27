@@ -186,6 +186,20 @@ export function decideBuiltin(input) {
       : deny('Agent 域写入需要 operator 角色');
   }
 
+  // R6f: 制品库 —— artifact.read 需 viewer+，artifact.write 需 operator+
+  if (action === 'artifact.read') {
+    const pj13 = requireProject(); if (pj13) return pj13;
+    return rankOf(actor.roles, project.id) >= 0
+      ? allow('制品库读取（viewer+）')
+      : deny('制品库读取需要 viewer 角色');
+  }
+  if (action === 'artifact.write') {
+    const pj14 = requireProject(); if (pj14) return pj14;
+    return rankOf(actor.roles, project.id) >= 1
+      ? allow('制品库写入（operator+）')
+      : deny('制品库写入需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }

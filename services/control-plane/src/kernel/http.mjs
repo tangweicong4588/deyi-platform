@@ -53,7 +53,9 @@ export function createApp() {
           let i = 0;
           const next = async () => { const fn = chain[i++]; if (fn) await fn(req, res, next); };
           await next();
-          if (!res.writableEnded) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '无响应' } });
+          // V3.3：流式下载等已接管响应的处理器（headersSent 但未 writableEnded，
+          // 如 pipe 中）不再补 404，否则对已发送头的响应重复写头。
+          if (!res.writableEnded && !res.headersSent) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '无响应' } });
         } catch (err) {
           const { status, body } = toErrorJson(err);
           if (status >= 500) logger.error('unhandled', { err: String(err && err.stack || err) });
@@ -73,6 +75,10 @@ export function createApp() {
 function readJson(req) {
   return new Promise((resolve, reject) => {
     if (!['POST', 'PUT', 'PATCH'].includes(req.method)) return resolve(undefined);
+    // V3.3：制品上传走 application/octet-stream 原始二进制（避免 base64 膨胀）；
+    // 上限由 ARTIFACT_MAX_BYTES 控制（默认 256MB），JSON 仍走 4MB 上限。
+    const ctype = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (ctype === 'application/octet-stream') return readRaw(req, resolve, reject);
     let raw = '';
     req.on('data', (c) => {
       raw += c;
@@ -84,6 +90,24 @@ function readJson(req) {
     });
     req.on('error', reject);
   });
+}
+
+function readRaw(req, resolve, reject) {
+  const limit = Number(process.env.ARTIFACT_MAX_BYTES) > 0
+    ? Number(process.env.ARTIFACT_MAX_BYTES) : 256 * 1024 * 1024;
+  const chunks = [];
+  let size = 0;
+  req.on('data', (c) => {
+    size += c.length;
+    if (size > limit) { reject(Errors.badRequest('制品过大（超 ARTIFACT_MAX_BYTES）')); req.destroy(); return; }
+    chunks.push(c);
+  });
+  req.on('end', () => {
+    const buf = Buffer.concat(chunks);
+    buf.isRawUpload = true; // 标记：调用方用 Buffer.isBuffer 判，附加标记防误判
+    resolve(buf);
+  });
+  req.on('error', reject);
 }
 
 export function sendJson(res, status, obj) {

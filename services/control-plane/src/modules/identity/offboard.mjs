@@ -31,6 +31,7 @@ import { withRetentionBypass } from '../evidence/retention.mjs';
 import { exportAudit } from '../evidence/compliance.mjs';
 import { deleteChunksByTenant } from '../knowledge/vector.mjs';
 import { deleteMemoriesByTenant } from '../memory/vector.mjs';
+import { purgeTenantBlobs } from '../artifacts/store.mjs';
 
 const CONFIRM_TTL_MS = 15 * 60_000;
 
@@ -42,7 +43,8 @@ const CONFIRM_TTL_MS = 15 * 60_000;
 const TABLE_DELETE_ORDER = [
   // --- 叶子：业务单据/执行/访问 ---
   'reconciliation_items', 'acceptance_criteria', 'acl_entries',
-  'action_executions', 'artifacts', 'auth_sessions', 'api_keys', 'budgets', 'clarifications',
+  'action_executions', 'artifacts', 'artifact_links', 'artifact_versions', 'artifact_packages',
+  'auth_sessions', 'api_keys', 'budgets', 'clarifications',
   'cost_ledger', 'credential_grants', 'evidence_packages', 'executions', 'fact_snapshots',
   'facts', 'gate_exceptions', 'gateway_usage_outbox', 'local_credentials', 'login_attempts',
   'memory_links', 'memory_promotions', 'model_calls', 'notify_deliveries', 'ontology_conflicts',
@@ -219,6 +221,13 @@ export async function confirmOffboard(tenantId, confirmToken, { actorId = 'opera
       [tenantId]);
     counts.pipeline_template_versions = Number(c[0]?.n || 0);
   }
+  // V3.3：制品 blob 文件清理——必须在行删除之前执行。
+  // purgeTenantBlobs 按 artifact_versions 行查本租户的 hash 全集，并跳过
+  // 仍有其他租户版本引用的共享 blob；它只删文件不删行，随后的删行循环再清 DB。
+  let artifactBlobs = { removed: 0 };
+  try {
+    artifactBlobs.removed = await purgeTenantBlobs(tenantId);
+  } catch (e) { artifactBlobs = { error: String(e?.message || e).slice(0, 120) }; }
   for (const t of TABLE_DELETE_ORDER) {
     if (t === 'projects' || t === 'actors') continue;
     if (t === 'pipeline_template_versions') continue; // 已在上方经模板关联删除
@@ -266,6 +275,7 @@ export async function confirmOffboard(tenantId, confirmToken, { actorId = 'opera
       audit_wiped: wipe.deleted_count,
       checkpoint_id: checkpointId,
       vectors,
+      artifact_blobs: artifactBlobs,
       invoices_kept: counts.billing_invoices_kept,
       anchors_kept: counts.anchors_kept,
     },
