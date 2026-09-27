@@ -18,6 +18,7 @@ import {
   bindRole, getRoleBindings,
 } from './store.mjs';
 import { provisionTenant } from './provision.mjs';
+import { dryRunOffboard, confirmOffboard } from './offboard.mjs';
 import { mintKey } from './keys.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
 import {
@@ -73,6 +74,19 @@ export function registerIdentityRoutes(app) {
       action: 'tenant.resume', resourceKind: 'tenant', resourceId: tenant.id, payload: {},
     });
     ok(res, tenant);
+  });
+  // V2.12：租户 offboard（销户），provision 的反操作。两阶段：
+  // phase=dryRun → 统计 + 合规包 manifest + confirm_token（不删除）；
+  // phase=confirm → 校验 token 后执行清除（幂等）。
+  app.post('/v1/admin/tenants/:tenantId/offboard', authenticate, requireOperator, async (req, res) => {
+    const { phase, confirm_token: confirmToken } = req.body || {};
+    if (phase === 'dryRun') {
+      ok(res, await dryRunOffboard(req.params.tenantId, { actorId: ctx().actorId }));
+    } else if (phase === 'confirm') {
+      ok(res, await confirmOffboard(req.params.tenantId, confirmToken, { actorId: ctx().actorId }));
+    } else {
+      throw Errors.badRequest("phase 非法：用 'dryRun' 或 'confirm'");
+    }
   });
 
   // ---------- 租户 admin：项目 ----------

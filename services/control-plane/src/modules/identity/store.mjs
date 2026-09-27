@@ -102,7 +102,7 @@ export const TENANT_PLANS = {
   professional: { max_projects: 50, max_actors: 200, max_api_keys: 200, rpm: 300, tokens_per_month: 100_000_000 },
   enterprise:   { max_projects: null, max_actors: null, max_api_keys: null, rpm: null, tokens_per_month: null },
 };
-export const TENANT_STATUSES = new Set(['active', 'suspended']);
+export const TENANT_STATUSES = new Set(['active', 'suspended', 'purged']); // V2.12：purged 为销户终态（行保留，数据已清）
 
 export function getTenantQuotas(tenant) {
   const base = TENANT_PLANS[tenant?.plan] || TENANT_PLANS.trial;

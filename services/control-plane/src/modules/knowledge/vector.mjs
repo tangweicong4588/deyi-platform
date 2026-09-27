@@ -144,6 +144,25 @@ export async function deleteChunks(platformIds) {
 }
 
 /**
+ * V2.12：按租户清除向量（offboard）。Qdrant 用 filter 删除；内存 fallback 扫描 payload。
+ * Qdrant 的 filter-delete 只返回状态不返回条数，如实返回 { engine, filter_applied: true }。
+ */
+export async function deleteChunksByTenant(tenantId) {
+  if (await qdrantAvailable()) {
+    await qfetch(`/collections/${COLLECTION}/points/delete`, {
+      method: 'POST',
+      body: { filter: { must: [{ key: 'tenant_id', match: { value: tenantId } }] } },
+    });
+    return { engine: 'qdrant', filter_applied: true };
+  }
+  let n = 0;
+  for (const [id, p] of memPoints) {
+    if (p?.payload?.tenant_id === tenantId) { memPoints.delete(id); n++; }
+  }
+  return { deleted: n, engine: 'memory(fallback)' };
+}
+
+/**
  * search: { vector, filter: {tenant_id, document_ids?}, limit }
  * 返回 [{ fact_id, document_id, score }]（文本从 DB 取，Qdrant 只做召回）
  */

@@ -127,6 +127,24 @@ export async function deleteMemories(platformIds) {
 }
 
 /**
+ * V2.12：按租户清除记忆向量（offboard）。语义同 knowledge/vector.mjs 的 deleteChunksByTenant。
+ */
+export async function deleteMemoriesByTenant(tenantId) {
+  if (await qdrantAvailable()) {
+    await qfetch(`/collections/${MEMORY_COLLECTION}/points/delete`, {
+      method: 'POST',
+      body: { filter: { must: [{ key: 'tenant_id', match: { value: tenantId } }] } },
+    });
+    return { engine: 'qdrant', filter_applied: true };
+  }
+  let n = 0;
+  for (const [id, p] of memPoints) {
+    if (p?.payload?.tenant_id === tenantId) { memPoints.delete(id); n++; }
+  }
+  return { deleted: n, engine: 'memory(fallback)' };
+}
+
+/**
  * search: { vector, filter: { tenant_id }, limit }
  * 返回 [{ memory_id, score, engine }]（文本/可见性/过期过滤在 DB 侧做，Qdrant 只做召回）
  */
