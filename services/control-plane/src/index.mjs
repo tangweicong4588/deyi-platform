@@ -21,6 +21,7 @@ import { registerBusinessRoutes } from './modules/business/routes.mjs';
 import { registerTaskRoutes } from './modules/tasks/routes.mjs';
 import { registerReleaseRoutes } from './modules/release/routes.mjs';
 import { registerAgentRoutes } from './modules/agents/routes.mjs';
+import { registerAgentTemplateRoutes } from './modules/agent_templates/routes.mjs';
 import { registerNotifyRoutes } from './modules/notify/routes.mjs';
 import { registerMemoryRoutes } from './modules/memory/routes.mjs';
 import { registerBillingRoutes } from './modules/billing/routes.mjs';
@@ -73,6 +74,7 @@ async function main() {
   registerTaskRoutes(app);
   registerReleaseRoutes(app);
   registerAgentRoutes(app);
+  registerAgentTemplateRoutes(app);
   registerNotifyRoutes(app);
   registerMemoryRoutes(app);
   registerBillingRoutes(app);
