@@ -53,7 +53,7 @@ const TABLE_DELETE_ORDER = [
   // --- 中层 ---
   'business_actions', 'ontology_terms', 'pull_requests', 'pipeline_runs', 'canonical_docs',
   'pipeline_instances', 'pipeline_template_versions', 'pipeline_templates',
-  'biz_task_transitions', 'biz_tasks',
+  'biz_task_transitions', 'biz_task_cost_links', 'biz_tasks',
   'release_steps', 'releases', 'deploy_environments',
   'agent_run_steps', 'agent_approvals', 'agent_runs', 'agent_versions', 'agents',
   'agent_template_instances', 'agent_templates',

@@ -109,6 +109,7 @@ export function registerAgentRoutes(app) {
       tenantId, projectId: project.id, actorId: actor.id,
       agentId: req.params.agentId, version: b.version ?? null,
       input: b.input || {}, mode: b.mode || 'live',
+      bizTaskId: b.biz_task_id || null, // V4.5：为任务执行时登记成本归因边
     }));
     sendJson(res, 201, { data: out });
   });

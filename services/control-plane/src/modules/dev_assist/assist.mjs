@@ -55,7 +55,7 @@ function extractReport(run) {
  * 对一次变更运行指定的 AI 助手。diff 由调用方提供（git diff 文本）；
  * context 默认取变更包关联需求的标题+描述。
  */
-export async function runAssist({ tenantId, projectId, actorId, changePackageId, kinds, diff, mode = 'simulated', params = {} }) {
+export async function runAssist({ tenantId, projectId, actorId, changePackageId, kinds, diff, mode = 'simulated', params = {}, bizTaskId = null }) {
   if (!['live', 'simulated'].includes(mode)) throw Errors.badRequest('mode 必须是 live/simulated');
   if (!Array.isArray(kinds) || !kinds.length) throw Errors.badRequest('kinds 必须为非空数组');
   for (const k of kinds) {
@@ -109,6 +109,11 @@ export async function runAssist({ tenantId, projectId, actorId, changePackageId,
     await tryAudit({ tenantId, projectId, actorId, action: 'dev_assist.run',
       resourceKind: 'ai_assist_run', resourceId: id,
       payload: { kind, change_package_id: changePackageId, run_id: run.id, status: run.status, ...usage } });
+    if (bizTaskId) {
+      // V4.5：为任务执行时登记成本归因边（trace_id = run.id，run 级 trace）
+      const { linkCost } = await import('../tasks/cost.mjs');
+      await linkCost({ tenantId, projectId, taskId: bizTaskId, kind: 'ai_assist_run', refId: id, traceId: run.id, actorId });
+    }
     results.push({
       id, kind, label: KIND_LABEL[kind], status: ok ? 'succeeded' : 'failed',
       agent_id: inst.agent.id, run_id: run.id, template_key: templateKey,

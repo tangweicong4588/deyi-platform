@@ -13,6 +13,7 @@ import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
 import * as t from './task.mjs';
+import { getTaskCost } from './cost.mjs';
 
 async function scopedProject(req, minRank, opName) {
   const c = ctx();
@@ -87,6 +88,14 @@ export function registerTaskRoutes(app) {
     const { project, tenantId, actor } = await scopedProject(req, 0, 'task.get');
     await policyCheck({ actor, tenantId, project, action: 'tasks.read', resource: { kind: 'biz_task' } });
     sendJson(res, 200, { data: await t.getTask(tenantId, project.id, req.params.taskId) });
+  });
+
+  // V4.5：任务成本视图（viewer+）——任务成本 == 其下 trace 的网关计量之和
+  app.get(R('/tasks/:taskId/cost'), authenticate, async (req, res) => {
+    const { project, tenantId, actor } = await scopedProject(req, 0, 'task.cost');
+    await policyCheck({ actor, tenantId, project, action: 'tasks.read', resource: { kind: 'biz_task' } });
+    const out = await withTenant(tenantId, () => getTaskCost({ tenantId, projectId: project.id, taskId: req.params.taskId }));
+    sendJson(res, 200, { data: out });
   });
 
   app.post(R('/tasks/:taskId/transition'), authenticate, async (req, res) => {

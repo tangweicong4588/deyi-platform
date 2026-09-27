@@ -22,7 +22,7 @@
 import { createHash } from 'node:crypto';
 import { newId, nowMs } from '../../kernel/ids.mjs';
 import { Errors } from '../../kernel/errors.mjs';
-import { ctx } from '../../kernel/context.mjs';
+import { ctx, runWithContext } from '../../kernel/context.mjs';
 import { db } from '../../db/index.mjs';
 import { logger } from '../../kernel/logging.mjs';
 import { compileAgentDefinition } from '../../adapters/langgraph/graph.mjs';
@@ -232,7 +232,7 @@ async function driveRun({ run, compiled, executors, tenantId, projectId, actorId
   return rows[0];
 }
 
-export async function startRun({ tenantId, projectId, actorId, agentId, version = null, input = {}, mode = 'live' }) {
+export async function startRun({ tenantId, projectId, actorId, agentId, version = null, input = {}, mode = 'live', bizTaskId = null }) {
   if (!['live', 'simulated'].includes(mode)) throw Errors.badRequest('mode 必须是 live/simulated');
   if (input && typeof input !== 'object') throw Errors.badRequest('input 必须是对象');
   const ver = await getAgentVersion({ tenantId, agentId, version });
@@ -250,8 +250,15 @@ export async function startRun({ tenantId, projectId, actorId, agentId, version 
     resourceKind: 'agent_run', resourceId: runId,
     payload: { agent_id: agentId, version: ver.version, mode } });
   const run = (await db().query('SELECT * FROM agent_runs WHERE id=?', [runId]))[0];
-  const executors = buildExecutors({ tenantId, projectId, actorId, traceId: c.traceId || runId, mode });
-  const final = await driveRun({ run, compiled, executors, tenantId, projectId, actorId });
+  // V4.5：run 级 trace——其下所有网关调用（llm/tool）都归因到 run.id，
+  // 使「run 成本 == 其下调用的网关计量之和」成立。
+  const executors = buildExecutors({ tenantId, projectId, actorId, traceId: runId, mode });
+  if (bizTaskId) {
+    const { linkCost } = await import('../tasks/cost.mjs');
+    await linkCost({ tenantId, projectId, taskId: bizTaskId, kind: 'agent_run', refId: runId, traceId: runId, actorId });
+  }
+  const final = await runWithContext({ ...c, traceId: runId }, () =>
+    driveRun({ run, compiled, executors, tenantId, projectId, actorId }));
   logger.info('agent run finished', { run: runId, status: final.status, mode });
   return presentRun(final);
 }
@@ -285,15 +292,15 @@ export async function decideApproval({ tenantId, projectId, actorId, runId, appr
 
   const ver = await getAgentVersion({ tenantId, agentId: run.agent_id, version: run.version });
   const compiled = compileAgentDefinition(ver.definition);
-  const c = ctx();
-  const executors = buildExecutors({ tenantId, projectId, actorId, traceId: c.traceId || run.id, mode: run.mode });
+  // V4.5：resume 的后续网关调用同样归因到 run.id（与 startRun 同一口径）
+  const executors = buildExecutors({ tenantId, projectId, actorId, traceId: run.id, mode: run.mode });
   // run 恢复为 running，resume 后由 driveRun 落终态
   await db().run(`UPDATE agent_runs SET status='running', updated_at=? WHERE id=?`, [now, run.id]);
   const fresh = (await db().query('SELECT * FROM agent_runs WHERE id=?', [runId]))[0];
-  const final = await driveRun({
+  const final = await runWithContext({ ...ctx(), traceId: run.id }, () => driveRun({
     run: fresh, compiled, executors, tenantId, projectId, actorId,
     resumeFrom: run.current_node, decision,
-  });
+  }));
   return presentRun(final);
 }
 

@@ -72,6 +72,7 @@ export function registerDevAssistRoutes(app) {
       tenantId, projectId: project.id, actorId: actor.id,
       changePackageId: req.params.changePackageId,
       kinds: b.kinds, diff: b.diff, mode: b.mode || 'simulated', params: b.params || {},
+      bizTaskId: b.biz_task_id || null, // V4.5：为任务执行时登记成本归因边
     }));
     sendJson(res, 201, { data: out });
   });

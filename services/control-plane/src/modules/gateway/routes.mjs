@@ -209,7 +209,14 @@ async function guardAndRoute(reqLike, endpoint, projectOverride = undefined) {
   const model = await resolveModel(body.model);
   const dataClass = checkDataClass(model, headers['x-deyi-data-class']);
   const keyProject = c.projectId ? await resolveProject({ headers: {} }) : null;
-  const project = keyProject || projectOverride || await resolveProject(reqLike);
+  // V4.5：chatInternal 传入的是 projectId 字符串（内部调用方），此处统一解析为项目对象；
+  // Key 绑定的项目仍优先收窄（keyProject 优先）。
+  let project = keyProject;
+  if (!project && typeof projectOverride === 'string' && projectOverride) {
+    project = await getProject(c.tenantId, projectOverride).catch(() => null);
+  }
+  if (!project && projectOverride && typeof projectOverride === 'object') project = projectOverride;
+  if (!project) project = await resolveProject(reqLike);
   const est = estimateCost(model, body, endpoint);
   const budgets = await budgetState(c.tenantId, project);
 
