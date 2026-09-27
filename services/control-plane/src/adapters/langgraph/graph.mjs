@@ -50,6 +50,12 @@ export function compileAgentDefinition(def) {
     if (!n.id || !ID_RE.test(n.id)) throw Errors.badRequest(`节点 id 非法: ${n.id}`);
     if (map.has(n.id)) throw Errors.badRequest(`节点 id 重复: ${n.id}`);
     if (!NODE_TYPES.includes(n.type)) throw Errors.badRequest(`节点 ${n.id} 类型非法: ${n.type}`);
+    // V4.6：hitl 节点可声明 approver_id（指派固定审批人；成员资格在发版时校验）
+    if (n.type === 'hitl' && n.approver_id !== undefined && n.approver_id !== null) {
+      if (typeof n.approver_id !== 'string' || !n.approver_id.trim()) {
+        throw Errors.badRequest(`hitl 节点 ${n.id} 的 approver_id 必须为非空字符串`);
+      }
+    }
     map.set(n.id, { ...n });
   }
   if (!map.has(entry)) throw Errors.badRequest(`entry 指向不存在的节点: ${entry}`);

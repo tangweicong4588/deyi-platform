@@ -9,7 +9,7 @@
 import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx, runWithContext } from '../../kernel/context.mjs';
-import { authenticate, effectiveRank } from '../identity/middleware.mjs';
+import { authenticate, effectiveRank, requireScope } from '../identity/middleware.mjs';
 import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
@@ -64,7 +64,7 @@ const R = (p) => `/v1/projects/:projectId${p}`;
 
 export function registerDevAssistRoutes(app) {
   // 对一次变更运行 AI 助手（operator+）
-  app.post(R('/change-packages/:changePackageId/ai-assist'), authenticate, async (req, res) => {
+  app.post(R('/change-packages/:changePackageId/ai-assist'), authenticate, requireScope('agent.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1);
     await policyCheck({ actor, tenantId, project, action: 'agent.write' });
     const b = req.body || {};
@@ -78,7 +78,7 @@ export function registerDevAssistRoutes(app) {
   });
 
   // 查询某变更的 AI 助手运行记录（含报告与消耗，viewer+）
-  app.get(R('/change-packages/:changePackageId/ai-assist'), authenticate, async (req, res) => {
+  app.get(R('/change-packages/:changePackageId/ai-assist'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read' });
     const out = await withTenant(tenantId, () => a.listAssistRuns({

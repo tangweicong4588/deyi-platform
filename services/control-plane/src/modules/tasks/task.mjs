@@ -17,6 +17,7 @@ import { Errors } from '../../kernel/errors.mjs';
 import { newId } from '../../kernel/ids.mjs';
 import { db } from '../../db/index.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
+import { assertProjectRole } from '../identity/permissions.mjs';
 
 const nowMs = () => Date.now();
 
@@ -100,15 +101,23 @@ export async function createTask({ tenantId, projectId, actorId, body }) {
     }
     slaDueAt = nowMs() + Math.round(slaH * 3600_000);
   }
-  // assignee 必须为本租户主体（防野指针）
+  // V4.6 行级权限：assignee 必须为本项目成员（viewer+），替代原来的"本租户主体"检查
   if (assigneeId) {
-    const ar = await db().query('SELECT id FROM actors WHERE id=? AND tenant_id=?', [assigneeId, tenantId]);
-    if (!ar[0]) throw Errors.badRequest('assigneeId 不是本租户主体');
+    await assertProjectRole(tenantId, projectId, assigneeId, 'viewer', '任务改派');
+  }
+  // V4.6 审批人指派：approval 单可在创建时指定 approver_id
+  let approverId = null;
+  if (kind === 'approval' && payload && payload.approver_id) {
+    approverId = String(payload.approver_id);
+    if (approverId === actorId) {
+      throw Errors.badRequest('审批人不能是发起人自己（SoD）', { code: 'SOD_VIOLATION' });
+    }
+    await assertProjectRole(tenantId, projectId, approverId, 'operator', '审批人指派');
   }
   const now = nowMs();
   const id = newId('bzt');
   const initPayload = kind === 'approval'
-    ? { decision: 'pending', ...(payload || {}) }
+    ? { decision: 'pending', ...(payload || {}), approver_id: approverId }
     : { ...(payload || {}) };
   await db().run(
     `INSERT INTO biz_tasks(id,tenant_id,project_id,kind,title,description,status,priority,
@@ -160,8 +169,8 @@ export async function assignTask({ tenantId, projectId, actorId, taskId, assigne
   const task = await getTaskRow(tenantId, projectId, taskId);
   if (TERMINAL_STATUSES.has(task.status)) throw Errors.badRequest(`任务已终态(${task.status})，不能改派`);
   if (assigneeId) {
-    const ar = await db().query('SELECT id FROM actors WHERE id=? AND tenant_id=?', [assigneeId, tenantId]);
-    if (!ar[0]) throw Errors.badRequest('assigneeId 不是本租户主体');
+    // V4.6 行级权限：只能改派给本项目成员（viewer+）
+    await assertProjectRole(tenantId, projectId, assigneeId, 'viewer', '任务改派');
   }
   await db().run(
     'UPDATE biz_tasks SET assignee_id=?, updated_at=? WHERE id=? AND tenant_id=?',
@@ -181,10 +190,21 @@ export async function assignTask({ tenantId, projectId, actorId, taskId, assigne
 export async function decideTask({ tenantId, projectId, actorId, taskId, approved, note = '' }) {
   const task = await getTaskRow(tenantId, projectId, taskId);
   if (task.kind !== 'approval') throw Errors.badRequest('只有审批单可以决议', { code: 'NOT_APPROVAL_TASK' });
+  const denied = (code, reason) => tryAudit({
+    tenantId, projectId, actorId, action: 'biz_task.decide.denied',
+    resourceKind: 'biz_task', resourceId: taskId,
+    payload: { code, reason, approved: !!approved },
+  });
   if (task.requester_id === actorId) {
+    await denied('SOD_VIOLATION', '发起人不能审批自己的审批单');
     throw Errors.forbidden('审批需职责分离：发起人不能审批自己的审批单', { code: 'SOD_VIOLATION' });
   }
+  // V4.6 审批人指派：指定了 approver_id 的单，只有被指派人可决议
   const payload = task.payload || {};
+  if (payload.approver_id && payload.approver_id !== actorId) {
+    await denied('APPROVER_MISMATCH', `该审批单已指派给 ${payload.approver_id} 决议`);
+    throw Errors.forbidden('该审批单已指派他人决议，无权审批', { code: 'APPROVER_MISMATCH' });
+  }
   if (payload.decision && payload.decision !== 'pending') return task; // 已决议，幂等返回
   if (!['in_progress', 'pending'].includes(task.status)) {
     throw Errors.badRequest(`审批单当前状态 ${task.status} 不可决议`, { code: 'INVALID_TRANSITION' });

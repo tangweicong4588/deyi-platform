@@ -8,11 +8,12 @@
 import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx, runWithContext } from '../../kernel/context.mjs';
-import { authenticate, effectiveRank } from '../identity/middleware.mjs';
+import { authenticate, effectiveRank, requireScope } from '../identity/middleware.mjs';
 import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
 import * as t from './task.mjs';
+import { tryAudit } from '../evidence/audit.mjs';
 import { getTaskCost } from './cost.mjs';
 
 async function scopedProject(req, minRank, opName) {
@@ -33,6 +34,13 @@ async function scopedProject(req, minRank, opName) {
   }
   if (!project || project.status !== 'active') throw Errors.forbidden('项目不存在或无权访问');
   if (effectiveRank(roles, project.id) < minRank) {
+    // V4.6：角色门槛拒绝记审计（越权发起可查）
+    await tryAudit({
+      tenantId: project.tenant_id, projectId: project.id, actorId: c.actorId,
+      action: 'biz_task.access.denied',
+      resourceKind: 'biz_task', resourceId: null,
+      payload: { op: opName || null, reason: `需要项目 ${minRank >= 1 ? 'operator' : 'viewer'} 及以上角色` },
+    });
     throw Errors.forbidden(minRank >= 1 ? '需要项目 operator 及以上角色' : '需要项目 viewer 及以上角色');
   }
   const tenantId = project.tenant_id;
@@ -48,7 +56,15 @@ async function policyCheck({ actor, tenantId, project, action, resource }) {
     action, resource: resource || {},
     context: {},
   }));
-  if (!receipt.allow) throw Errors.policyDenied(receipt.reason, { receipt });
+  if (!receipt.allow) {
+    // V4.6：越权尝试记审计，满足"审计可查"
+    await tryAudit({
+      tenantId, projectId: project.id, actorId: actor.id, action: 'biz_task.access.denied',
+      resourceKind: (resource && resource.kind) || 'biz_task', resourceId: (resource && resource.id) || null,
+      payload: { policy_action: action, reason: receipt.reason },
+    });
+    throw Errors.policyDenied(receipt.reason, { receipt });
+  }
   return receipt;
 }
 
@@ -63,7 +79,7 @@ function withTenant(tenantId, fn) {
 const R = (p) => `/v1/projects/:projectId${p}`;
 
 export function registerTaskRoutes(app) {
-  app.post(R('/tasks'), authenticate, async (req, res) => {
+  app.post(R('/tasks'), authenticate, requireScope('tasks.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1, 'task.create');
     await policyCheck({ actor, tenantId, project, action: 'tasks.write', resource: { kind: 'biz_task' } });
     const out = await withTenant(tenantId, () => t.createTask({
@@ -72,7 +88,7 @@ export function registerTaskRoutes(app) {
     sendJson(res, 201, { data: out });
   });
 
-  app.get(R('/tasks'), authenticate, async (req, res) => {
+  app.get(R('/tasks'), authenticate, requireScope('tasks.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0, 'task.list');
     await policyCheck({ actor, tenantId, project, action: 'tasks.read', resource: { kind: 'biz_task' } });
     const { status, kind, assigneeId, escalated } = req.query || {};
@@ -84,21 +100,21 @@ export function registerTaskRoutes(app) {
     });
   });
 
-  app.get(R('/tasks/:taskId'), authenticate, async (req, res) => {
+  app.get(R('/tasks/:taskId'), authenticate, requireScope('tasks.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0, 'task.get');
     await policyCheck({ actor, tenantId, project, action: 'tasks.read', resource: { kind: 'biz_task' } });
     sendJson(res, 200, { data: await t.getTask(tenantId, project.id, req.params.taskId) });
   });
 
   // V4.5：任务成本视图（viewer+）——任务成本 == 其下 trace 的网关计量之和
-  app.get(R('/tasks/:taskId/cost'), authenticate, async (req, res) => {
+  app.get(R('/tasks/:taskId/cost'), authenticate, requireScope('tasks.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0, 'task.cost');
     await policyCheck({ actor, tenantId, project, action: 'tasks.read', resource: { kind: 'biz_task' } });
     const out = await withTenant(tenantId, () => getTaskCost({ tenantId, projectId: project.id, taskId: req.params.taskId }));
     sendJson(res, 200, { data: out });
   });
 
-  app.post(R('/tasks/:taskId/transition'), authenticate, async (req, res) => {
+  app.post(R('/tasks/:taskId/transition'), authenticate, requireScope('tasks.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1, 'task.transition');
     await policyCheck({ actor, tenantId, project, action: 'tasks.write', resource: { kind: 'biz_task' } });
     const { to, note } = req.body || {};
@@ -110,7 +126,7 @@ export function registerTaskRoutes(app) {
     sendJson(res, 200, { data: out });
   });
 
-  app.post(R('/tasks/:taskId/assign'), authenticate, async (req, res) => {
+  app.post(R('/tasks/:taskId/assign'), authenticate, requireScope('tasks.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1, 'task.assign');
     await policyCheck({ actor, tenantId, project, action: 'tasks.write', resource: { kind: 'biz_task' } });
     const out = await withTenant(tenantId, () => t.assignTask({
@@ -120,7 +136,7 @@ export function registerTaskRoutes(app) {
     sendJson(res, 200, { data: out });
   });
 
-  app.post(R('/tasks/:taskId/decide'), authenticate, async (req, res) => {
+  app.post(R('/tasks/:taskId/decide'), authenticate, requireScope('tasks.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1, 'task.decide');
     await policyCheck({ actor, tenantId, project, action: 'tasks.write', resource: { kind: 'biz_task' } });
     const { approved, note } = req.body || {};
@@ -132,7 +148,7 @@ export function registerTaskRoutes(app) {
     sendJson(res, 200, { data: out });
   });
 
-  app.post(R('/tasks/sla-sweep'), authenticate, async (req, res) => {
+  app.post(R('/tasks/sla-sweep'), authenticate, requireScope('tasks.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1, 'task.sla-sweep');
     await policyCheck({ actor, tenantId, project, action: 'tasks.write', resource: { kind: 'biz_task' } });
     const out = await withTenant(tenantId, () => t.slaSweep({

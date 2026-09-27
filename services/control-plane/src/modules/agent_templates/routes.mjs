@@ -9,7 +9,7 @@
 import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx, runWithContext } from '../../kernel/context.mjs';
-import { authenticate, effectiveRank } from '../identity/middleware.mjs';
+import { authenticate, effectiveRank, requireScope } from '../identity/middleware.mjs';
 import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
@@ -64,7 +64,7 @@ const R = (p) => `/v1/projects/:projectId${p}`;
 
 export function registerAgentTemplateRoutes(app) {
   // 模板市场：平台内置 + 本租户自定义
-  app.get(R('/agent-templates'), authenticate, async (req, res) => {
+  app.get(R('/agent-templates'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read' });
     const out = await withTenant(tenantId, () => t.listTemplates({
@@ -74,7 +74,7 @@ export function registerAgentTemplateRoutes(app) {
   });
 
   // 模板详情（含 params_schema 与定义模板）
-  app.get(R('/agent-templates/:templateId'), authenticate, async (req, res) => {
+  app.get(R('/agent-templates/:templateId'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read' });
     const out = await withTenant(tenantId, () => t.getTemplate({ tenantId, templateId: req.params.templateId }));
@@ -82,7 +82,7 @@ export function registerAgentTemplateRoutes(app) {
   });
 
   // 创建租户自定义模板（operator+）
-  app.post(R('/agent-templates'), authenticate, async (req, res) => {
+  app.post(R('/agent-templates'), authenticate, requireScope('agent.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1);
     await policyCheck({ actor, tenantId, project, action: 'agent.write' });
     const out = await withTenant(tenantId, () => t.createTemplate({
@@ -92,7 +92,7 @@ export function registerAgentTemplateRoutes(app) {
   });
 
   // 从模板实例化一个可运行的业务 Agent（operator+）
-  app.post(R('/agent-templates/:templateId/instantiate'), authenticate, async (req, res) => {
+  app.post(R('/agent-templates/:templateId/instantiate'), authenticate, requireScope('agent.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1);
     await policyCheck({ actor, tenantId, project, action: 'agent.write' });
     const b = req.body || {};
@@ -105,7 +105,7 @@ export function registerAgentTemplateRoutes(app) {
   });
 
   // 实例化记录
-  app.get(R('/agent-template-instances'), authenticate, async (req, res) => {
+  app.get(R('/agent-template-instances'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read' });
     const out = await withTenant(tenantId, () => t.listInstances({ tenantId, projectId: project.id }));

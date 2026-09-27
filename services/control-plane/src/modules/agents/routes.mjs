@@ -7,11 +7,12 @@
 import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx, runWithContext } from '../../kernel/context.mjs';
-import { authenticate, effectiveRank } from '../identity/middleware.mjs';
+import { authenticate, effectiveRank, requireScope } from '../identity/middleware.mjs';
 import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
 import * as a from './agents.mjs';
+import { tryAudit } from '../evidence/audit.mjs';
 
 async function scopedProject(req, minRank) {
   const c = ctx();
@@ -31,6 +32,13 @@ async function scopedProject(req, minRank) {
   }
   if (!project || project.status !== 'active') throw Errors.forbidden('项目不存在或无权访问');
   if (effectiveRank(roles, project.id) < minRank) {
+    // V4.6：角色门槛拒绝记审计（越权发起可查）
+    await tryAudit({
+      tenantId: project.tenant_id, projectId: project.id, actorId: c.actorId,
+      action: 'agent.access.denied',
+      resourceKind: 'agent', resourceId: null,
+      payload: { reason: `需要项目 ${minRank >= 1 ? 'operator' : 'viewer'} 及以上角色` },
+    });
     throw Errors.forbidden(minRank >= 1 ? '需要项目 operator 及以上角色' : '需要项目 viewer 及以上角色');
   }
   const tenantId = project.tenant_id;
@@ -46,7 +54,15 @@ async function policyCheck({ actor, tenantId, project, action, resource }) {
     action, resource: resource || {},
     context: {},
   }));
-  if (!receipt.allow) throw Errors.policyDenied(receipt.reason, { receipt });
+  if (!receipt.allow) {
+    // V4.6：越权尝试记审计
+    await tryAudit({
+      tenantId, projectId: project.id, actorId: actor.id, action: 'agent.access.denied',
+      resourceKind: (resource && resource.kind) || 'agent', resourceId: (resource && resource.id) || null,
+      payload: { policy_action: action, reason: receipt.reason },
+    });
+    throw Errors.policyDenied(receipt.reason, { receipt });
+  }
   return receipt;
 }
 
@@ -62,7 +78,7 @@ const R = (p) => `/v1/projects/:projectId${p}`;
 
 export function registerAgentRoutes(app) {
   // 注册 Agent
-  app.post(R('/agents'), authenticate, async (req, res) => {
+  app.post(R('/agents'), authenticate, requireScope('agent.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1);
     await policyCheck({ actor, tenantId, project, action: 'agent.write', resource: { kind: 'agent' } });
     const b = req.body || {};
@@ -74,7 +90,7 @@ export function registerAgentRoutes(app) {
   });
 
   // Agent 列表
-  app.get(R('/agents'), authenticate, async (req, res) => {
+  app.get(R('/agents'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read', resource: { kind: 'agent' } });
     const out = await withTenant(tenantId, () => a.listAgents({ tenantId, projectId: project.id }));
@@ -82,7 +98,7 @@ export function registerAgentRoutes(app) {
   });
 
   // Agent 详情（含版本列表）
-  app.get(R('/agents/:agentId'), authenticate, async (req, res) => {
+  app.get(R('/agents/:agentId'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read', resource: { kind: 'agent' } });
     const out = await withTenant(tenantId, () => a.getAgent({ tenantId, agentId: req.params.agentId }));
@@ -90,7 +106,7 @@ export function registerAgentRoutes(app) {
   });
 
   // 发版（不可变版本快照）
-  app.post(R('/agents/:agentId/versions'), authenticate, async (req, res) => {
+  app.post(R('/agents/:agentId/versions'), authenticate, requireScope('agent.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1);
     await policyCheck({ actor, tenantId, project, action: 'agent.write', resource: { kind: 'agent' } });
     const out = await withTenant(tenantId, () => a.createAgentVersion({
@@ -101,7 +117,7 @@ export function registerAgentRoutes(app) {
   });
 
   // 启动执行
-  app.post(R('/agents/:agentId/runs'), authenticate, async (req, res) => {
+  app.post(R('/agents/:agentId/runs'), authenticate, requireScope('agent.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1);
     await policyCheck({ actor, tenantId, project, action: 'agent.write', resource: { kind: 'agent_run' } });
     const b = req.body || {};
@@ -115,7 +131,7 @@ export function registerAgentRoutes(app) {
   });
 
   // 执行记录列表
-  app.get(R('/agents/:agentId/runs'), authenticate, async (req, res) => {
+  app.get(R('/agents/:agentId/runs'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read', resource: { kind: 'agent_run' } });
     const out = await withTenant(tenantId, () => a.listRuns({
@@ -126,7 +142,7 @@ export function registerAgentRoutes(app) {
   });
 
   // 执行记录详情（含步骤与审批单）
-  app.get(R('/agent-runs/:runId'), authenticate, async (req, res) => {
+  app.get(R('/agent-runs/:runId'), authenticate, requireScope('agent.read'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 0);
     await policyCheck({ actor, tenantId, project, action: 'agent.read', resource: { kind: 'agent_run' } });
     const out = await withTenant(tenantId, () => a.getRun({
@@ -136,7 +152,7 @@ export function registerAgentRoutes(app) {
   });
 
   // 审批决议（SoD：不能批自己的 run）
-  app.post(R('/agent-runs/:runId/approve'), authenticate, async (req, res) => {
+  app.post(R('/agent-runs/:runId/approve'), authenticate, requireScope('agent.write'), async (req, res) => {
     const { project, tenantId, actor } = await scopedProject(req, 1);
     await policyCheck({ actor, tenantId, project, action: 'agent.write', resource: { kind: 'agent_approval' } });
     const b = req.body || {};

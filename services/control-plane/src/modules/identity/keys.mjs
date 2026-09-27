@@ -60,6 +60,9 @@ export const KEY_SCOPES = [
   'sagas.read', 'sagas.write',
   'trace.read', // V3.4 全链路追溯：只读
   'dora.read', // V3.6 研发效能度量：只读
+  'tasks.read', 'tasks.write', // V4.1 业务任务
+  'agent.read', 'agent.write', // V4.2 Agent 编排（含模板/V3.5 AI 助手）
+  'release.read', 'release.write', // V3.2 发布单
   'identity.keys', // key 管理：签发/轮换/吊销
 ];
 

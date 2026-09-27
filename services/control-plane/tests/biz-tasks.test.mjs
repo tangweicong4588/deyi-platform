@@ -132,7 +132,7 @@ test('V4.1：改派——本租户主体 ok；外租户主体 400；终态不可
   assert.equal(r.status, 200);
   assert.equal((await r.json()).data.assignee_id, admin2Id);
   const bad = await post(`${P()}/${t.id}/assign`, { assigneeId: 'actor_not_exist' });
-  assert.equal(bad.status, 400);
+  assert.equal(bad.status, 403); // V4.6：非项目成员（含不存在）改派一律 403
   await transition(t.id, 'cancelled');
   assert.equal((await post(`${P()}/${t.id}/assign`, { assigneeId: admin2Id })).status, 400);
 });

@@ -21,6 +21,7 @@ import { newId } from '../../kernel/ids.mjs';
 import { ctx, newTraceId } from '../../kernel/context.mjs';
 import { db } from '../../db/index.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
+import { assertProjectRole } from '../identity/permissions.mjs';
 import { getChangePackage } from '../delivery/service.mjs';
 import {
   execute as runnerExecute,
@@ -232,17 +233,26 @@ export async function listReleases(tenantId, projectId, { status, environment_ke
 
 // ---------- approval ----------
 
-export async function requestApproval({ tenantId, projectId, actorId, releaseId }) {
+export async function requestApproval({ tenantId, projectId, actorId, releaseId, approverId = null }) {
   const rel = await getReleaseRow(tenantId, projectId, releaseId);
   if (!rel.requires_approval) throw Errors.badRequest('该发布单不需要审批');
   if (rel.status !== 'draft') throw Errors.badRequest(`只有 draft 可发起审批，当前 ${rel.status}`);
+  // V4.6 审批人指派：approver 必须是本项目成员（operator+），且不能是发起人
+  let approver = null;
+  if (approverId) {
+    approver = String(approverId);
+    if (approver === actorId) {
+      throw Errors.badRequest('审批人不能是发起人自己（SoD）', { code: 'SOD_VIOLATION' });
+    }
+    await assertProjectRole(tenantId, projectId, approver, 'operator', '发布审批人指派');
+  }
   const now = nowMs();
-  const approval = { required: true, requested_by: actorId, requested_at: now, decision: 'pending', source: 'manual' };
+  const approval = { required: true, requested_by: actorId, requested_at: now, decision: 'pending', source: 'manual', approver_id: approver };
   await db().run('UPDATE releases SET status=?, approval=?, updated_at=? WHERE id=? AND tenant_id=?',
     ['pending_approval', JSON.stringify(approval), now, releaseId, tenantId]);
   await tryAudit({
     tenantId, projectId, actorId, action: 'release.approval.request',
-    resourceKind: 'release', resourceId: releaseId, payload: {},
+    resourceKind: 'release', resourceId: releaseId, payload: { approver_id: approver },
   });
   return getReleaseRow(tenantId, projectId, releaseId);
 }
@@ -251,8 +261,19 @@ export async function requestApproval({ tenantId, projectId, actorId, releaseId 
 export async function decideApproval({ tenantId, projectId, actorId, releaseId, approved, note = '' }) {
   const rel = await getReleaseRow(tenantId, projectId, releaseId);
   if (rel.status !== 'pending_approval') throw Errors.badRequest(`当前状态 ${rel.status} 不可审批`);
+  const denied = (code, reason) => tryAudit({
+    tenantId, projectId, actorId, action: 'release.approval.denied',
+    resourceKind: 'release', resourceId: releaseId,
+    payload: { code, reason, approved: !!approved },
+  });
   if (rel.created_by === actorId) {
+    await denied('SOD_VIOLATION', '发起人不能审批自己的发布单');
     throw Errors.forbidden('发布审批需职责分离：发起人不能审批自己的发布单', { code: 'SOD_VIOLATION' });
+  }
+  // V4.6 审批人指派：指定了 approver_id 的，只有被指派人可决议
+  if (rel.approval && rel.approval.approver_id && rel.approval.approver_id !== actorId) {
+    await denied('APPROVER_MISMATCH', `该发布审批已指派给 ${rel.approval.approver_id}`);
+    throw Errors.forbidden('该发布审批已指派他人决议，无权审批', { code: 'APPROVER_MISMATCH' });
   }
   const now = nowMs();
   const approval = {

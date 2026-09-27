@@ -30,6 +30,7 @@ import { runGraph, resumeGraph } from '../../adapters/langgraph/local.mjs';
 import { chatInternal } from '../gateway/routes.mjs';
 import { invokeTool } from '../execution/service.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
+import { assertProjectRole } from '../identity/permissions.mjs';
 
 const SECRET_KEY_RE = /(^|_)(secret|passwd|password|api_key|token|authorization|credentials?|private_key)($|_)/i;
 
@@ -106,6 +107,12 @@ export async function createAgentVersion({ tenantId, projectId, actorId, agentId
   if (agent.project_id !== projectId) throw Errors.forbidden('Agent 不属于该项目');
   if (agent.archived_at) throw Errors.conflict('Agent 已归档，不能发版');
   const compiled = compileAgentDefinition(definition); // 抛 400 即校验失败
+  // V4.6：hitl 节点若声明 approver_id，必须是本项目成员（viewer+；决议时路由要求 operator+）
+  for (const n of compiled.nodes.values()) {
+    if (n.type === 'hitl' && n.approver_id) {
+      await assertProjectRole(tenantId, projectId, String(n.approver_id), 'viewer', `hitl 节点 ${n.id} 审批人指派`);
+    }
+  }
   const now = nowMs();
   const maxRow = await db().query(
     'SELECT MAX(version) AS m FROM agent_versions WHERE agent_id=?', [agentId]);
@@ -174,9 +181,11 @@ async function driveRun({ run, compiled, executors, tenantId, projectId, actorId
     const now = nowMs();
     const approvalId = newId('aga');
     // 呈交审批人的上下文：已执行节点的输出摘要（脱敏）
+    // V4.6：hitl 节点可在定义中声明 approver_id，指派固定审批人
     const payload = {
       agent_id: run.agent_id, version: run.version, node_id: node.id,
       title: node.title || node.name || node.id,
+      approver_id: node.approver_id || null,
       context: scrubSecrets(state.steps || {}),
     };
     await db().run(
@@ -276,7 +285,18 @@ export async function decideApproval({ tenantId, projectId, actorId, runId, appr
   if (!approval) throw Errors.conflict('没有待处理的审批单');
   // SoD：发起人不能审批自己的 run
   if (approval.requested_by === actorId) {
-    throw Errors.forbidden('不能审批自己发起的执行（SoD）');
+    await tryAudit({ tenantId, projectId, actorId, action: 'agent.approval.denied',
+      resourceKind: 'agent_approval', resourceId: approval.id,
+      payload: { code: 'SOD_VIOLATION', reason: '发起人不能审批自己的执行' } });
+    throw Errors.forbidden('不能审批自己发起的执行（SoD）', { code: 'SOD_VIOLATION' });
+  }
+  // V4.6 审批人指派：hitl 节点声明了 approver_id 的，只有被指派人可决议
+  const apPayload = approval.payload ? JSON.parse(approval.payload) : {};
+  if (apPayload.approver_id && apPayload.approver_id !== actorId) {
+    await tryAudit({ tenantId, projectId, actorId, action: 'agent.approval.denied',
+      resourceKind: 'agent_approval', resourceId: approval.id,
+      payload: { code: 'APPROVER_MISMATCH', reason: `该审批已指派给 ${apPayload.approver_id}` } });
+    throw Errors.forbidden('该审批已指派他人决议，无权审批', { code: 'APPROVER_MISMATCH' });
   }
   const now = nowMs();
   const decision = approved ? 'approved' : 'rejected';
