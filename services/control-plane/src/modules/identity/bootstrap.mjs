@@ -9,7 +9,7 @@ import { config } from '../../kernel/config.mjs';
 import { logger } from '../../kernel/logging.mjs';
 import { db } from '../../db/index.mjs';
 import { createTenant, createActor, bindRole, createApiKeyRow, slugify } from './store.mjs';
-import { mintKey } from './keys.mjs';
+import { mintKey, KEY_SCOPES } from './keys.mjs';
 
 export async function maybeBootstrap() {
   if (!config.bootstrapEnabled) return null;
@@ -22,7 +22,7 @@ export async function maybeBootstrap() {
   const { secret, prefix, keyHash } = mintKey();
   await createApiKeyRow({
     tenantId: tenant.id, actorId: actor.id, name: 'bootstrap-admin',
-    prefix, keyHash, scopes: ['*'],
+    prefix, keyHash, scopes: [...KEY_SCOPES], // V2.5 起 '*' 非法：显式授予全部词表 scope
   });
 
   // L-4 安全 review：OPERATOR_TOKEN 不打明文；未设置时不编造"可用"token

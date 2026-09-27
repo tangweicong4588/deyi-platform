@@ -1,45 +1,82 @@
-import { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { login as apiLogin, fetchMe } from '../api/auth';
-import type { Me } from '../api/auth';
+import { login as apiLogin, fetchMe, listProjects } from '../api/auth';
+import type { Me, Project } from '../api/auth';
 
-const TOKEN_KEY = 'deyi.console.token';
+const TOKEN_KEY = 'deyi.console.access_token';
+const PROJECT_KEY = 'deyi.console.project_id';
 
 interface AuthState {
   token: string | null;
   me: Me | null;
-  login: (username: string, password: string) => Promise<void>;
+  projects: Project[];
+  projectId: string | null;
+  login: (tenant: string, username: string, password: string, totpCode?: string) => Promise<void>;
   logout: () => void;
+  selectProject: (id: string) => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
 
 /**
- * 鉴权壳。F0 为可跑通的壳：
- * - token 暂存 localStorage（接 mock 可登录；生产联调前应换 httpOnly cookie 或内存+refresh，见 README 边界说明）
+ * 鉴权（F1 接真实后端）：
+ * - accessToken 存 localStorage（15min 有效；refresh 续期在 F2 接）
+ * - 登录后拉取 /v1/me 与项目列表，默认选中上次或第一个项目
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
   const [me, setMe] = useState<Me | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem(PROJECT_KEY));
 
-  const login = useCallback(async (username: string, password: string) => {
-    const r = await apiLogin(username, password);
-    localStorage.setItem(TOKEN_KEY, r.token);
-    setToken(r.token);
+  const loadSession = useCallback(async (t: string) => {
+    const m = await fetchMe(t);
+    setMe(m);
     try {
-      setMe(await fetchMe(r.token));
+      const ps = await listProjects(t);
+      setProjects(ps);
+      setProjectId((prev) => {
+        const saved = localStorage.getItem(PROJECT_KEY);
+        const ok = (id: string | null) => id && ps.some((p) => p.id === id);
+        const next = ok(prev) ? prev! : ok(saved) ? saved! : ps[0]?.id ?? null;
+        if (next) localStorage.setItem(PROJECT_KEY, next);
+        return next;
+      });
     } catch {
-      setMe(null);
+      setProjects([]);
     }
   }, []);
+
+  useEffect(() => {
+    if (token) loadSession(token).catch(() => {});
+  }, [token, loadSession]);
+
+  const login = useCallback(
+    async (tenant: string, username: string, password: string, totpCode?: string) => {
+      const r = await apiLogin(tenant.trim(), username.trim(), password, totpCode);
+      localStorage.setItem(TOKEN_KEY, r.accessToken);
+      setToken(r.accessToken);
+      await loadSession(r.accessToken);
+    },
+    [loadSession],
+  );
 
   const logout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
     setToken(null);
     setMe(null);
+    setProjects([]);
   }, []);
 
-  const value = useMemo(() => ({ token, me, login, logout }), [token, me, login, logout]);
+  const selectProject = useCallback((id: string) => {
+    localStorage.setItem(PROJECT_KEY, id);
+    setProjectId(id);
+  }, []);
+
+  const value = useMemo(
+    () => ({ token, me, projects, projectId, login, logout, selectProject }),
+    [token, me, projects, projectId, login, logout, selectProject],
+  );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

@@ -143,7 +143,7 @@ test('ingest：Docling 解析 → embedding(网关) → 索引 → 可检索', a
   const r = await post(`/v1/projects/${pA1.id}/knowledge/documents`,
     { title: '架构说明', content: DOC_TEXT_A1, mime: 'text/markdown' }, adminKeyA);
   assert.equal(r.status, 201);
-  const out = await r.json();
+  const out = (await r.json()).data; // 信封 { data }（F1 对齐平台约定）
   assert.equal(out.document.status, 'ready');
   assert.equal(out.canonical.version, 1);
   assert.equal(out.canonical.parse_engine, 'docling');
@@ -186,12 +186,12 @@ test('ACL 预过滤：A2 看不到 A1 的文档；共享后可见', async () => 
 test('版本链：reparse 生成 v2，旧 facts 标记 superseded', async () => {
   const r = await post(`/v1/projects/${pA3.id}/knowledge/documents`,
     { title: '版本测试', content: '第一版内容：旧架构说明。', mime: 'text/markdown' }, adminKeyA);
-  const docId = (await r.json()).document.id;
+  const docId = (await r.json()).data.document.id;
 
   const rp = await post(`/v1/projects/${pA3.id}/knowledge/documents/${docId}/reparse`,
     { content: '第二版内容：全新架构说明，引入向量检索。' }, adminKeyA);
   assert.equal(rp.status, 200);
-  const out = await rp.json();
+  const out = (await rp.json()).data; // 信封 { data }（F1 对齐平台约定）
   assert.equal(out.canonical.version, 2);
 
   const facts = await db().query(`SELECT status, COUNT(*) AS n FROM facts WHERE document_id=? GROUP BY status`, [docId]);

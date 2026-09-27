@@ -50,3 +50,4 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
 
 export const get = <T>(path: string, opts?: Options) => api<T>(path, { ...opts, method: 'GET' });
 export const post = <T>(path: string, body?: unknown, opts?: Options) => api<T>(path, { ...opts, method: 'POST', body });
+export const del = <T>(path: string, opts?: Options) => api<T>(path, { ...opts, method: 'DELETE' });

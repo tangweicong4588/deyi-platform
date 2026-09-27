@@ -97,7 +97,7 @@ export function registerKnowledgeRoutes(app) {
       tenantId, projectId: project.id, actorId: c.actorId,
       title, content, mime, dataClass,
     }));
-    sendJson(res, 201, out);
+    sendJson(res, 201, { data: out });
   });
 
   // ---- list ----
@@ -121,7 +121,7 @@ export function registerKnowledgeRoutes(app) {
     const out = await withTenant(tenantId, () => svc.reparseDocument({
       tenantId, projectId: project.id, documentId: req.params.docId, actorId: c.actorId, content, mime,
     }));
-    sendJson(res, 200, out);
+    sendJson(res, 200, { data: out });
   });
 
   // ---- share（显式跨项目授权） ----

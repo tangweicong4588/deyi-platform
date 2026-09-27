@@ -1,20 +1,50 @@
-import { post } from './client';
+import { post, get } from './client';
 
+/** V2.10 真实登录：POST /v1/auth/login { tenant, username, password, totpCode? } */
 export interface LoginResult {
-  token: string;
-  user: { id: string; name: string; email?: string };
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  tokenType: string;
+  actor: { id: string; name: string; kind: string };
+  tenant: { id: string; slug: string };
 }
 
-/** V2.10 身份服务：用户名密码登录（TOTP 二次校验在 F1 接入，此处为壳） */
-export function login(username: string, password: string): Promise<LoginResult> {
-  return post<LoginResult>('/v1/auth/login', { username, password });
+export function login(tenant: string, username: string, password: string, totpCode?: string): Promise<LoginResult> {
+  return post<LoginResult>('/v1/auth/login', { tenant, username, password, totpCode: totpCode || undefined });
 }
 
 export interface Me {
   actor: { id: string; kind: string; name: string };
-  tenant: { id: string; name: string } | null;
+  tenant: { id: string; name: string; slug: string } | null;
+  authKind: string;
 }
 
+/** GET /v1/me（F0 的 POST /v1/auth/me 只是 mock 壳，已废弃） */
 export function fetchMe(token: string): Promise<Me> {
-  return post<Me>('/v1/auth/me', undefined, { token });
+  return get<Me>('/v1/me', { token });
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  slug?: string;
+  status: string;
+}
+
+export function listProjects(token: string): Promise<Project[]> {
+  return get<Project[]>('/v1/projects', { token });
+}
+
+/** TOTP 未通过时后端返回 401 + details.code=TOTP_REQUIRED */
+export function isTotpRequired(e: unknown): boolean {
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    'status' in e &&
+    (e as { status: number }).status === 401 &&
+    'details' in e &&
+    typeof (e as { details?: unknown }).details === 'object' &&
+    (e as { details: { code?: string } }).details?.code === 'TOTP_REQUIRED'
+  );
 }
