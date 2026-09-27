@@ -1,0 +1,80 @@
+/* F2 租户管理面：密钥 / 账单 / 配额页面的补充样式 */
+
+.secret-box {
+  background: #0f141c;
+  color: #7ee2a8;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 10px 0 14px;
+  word-break: break-all;
+  font-size: 14px;
+}
+
+.scope-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px 12px;
+  margin-top: 4px;
+}
+
+.scope-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #3c475c;
+  cursor: pointer;
+}
+
+.scope-check code {
+  font-size: 11px;
+}
+
+.quota-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: #e8edf4;
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.quota-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #1f6feb;
+}
+
+.quota-bar > i.over {
+  background: #c23333;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 4px 12px;
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+.kv dt { color: #6b768c; }
+.kv dd { margin: 0; color: #1c2330; }
+
+table.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.data-table th,
+table.data-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+table.data-table th {
+  color: #6b768c;
+  font-weight: 600;
+  font-size: 12px;
+}

@@ -8,6 +8,9 @@ import { TaskDetailPage } from './pages/TaskDetailPage';
 import { KnowledgePage } from './pages/KnowledgePage';
 import { MemoryPage } from './pages/MemoryPage';
 import { UsagePage } from './pages/UsagePage';
+import { ApiKeysPage } from './pages/settings/ApiKeysPage';
+import { BillingPage } from './pages/settings/BillingPage';
+import { QuotasPage } from './pages/settings/QuotasPage';
 
 export function App() {
   return (
@@ -28,6 +31,9 @@ export function App() {
           <Route path="knowledge" element={<KnowledgePage />} />
           <Route path="memory" element={<MemoryPage />} />
           <Route path="usage" element={<UsagePage />} />
+          <Route path="settings/keys" element={<ApiKeysPage />} />
+          <Route path="settings/billing" element={<BillingPage />} />
+          <Route path="settings/quotas" element={<QuotasPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

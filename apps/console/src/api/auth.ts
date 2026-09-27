@@ -18,6 +18,7 @@ export interface Me {
   actor: { id: string; kind: string; name: string };
   tenant: { id: string; name: string; slug: string } | null;
   authKind: string;
+  roles: Array<{ project_id: string | null; role: string }>;
 }
 
 /** GET /v1/me（F0 的 POST /v1/auth/me 只是 mock 壳，已废弃） */

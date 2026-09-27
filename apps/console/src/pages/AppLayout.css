@@ -47,3 +47,9 @@
 table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.data th, table.data td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #edf0f5; }
 table.data th { color: #6b768c; font-weight: 600; font-size: 12px; }
+.layout__section {
+  margin: 14px 8px 4px;
+  font-size: 11px;
+  color: #93a0b8;
+  letter-spacing: 2px;
+}

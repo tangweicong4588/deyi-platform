@@ -48,6 +48,7 @@ export const handlers = [
         actor: { id: 'usr_mock', kind: 'user', name: 'Mock 用户' },
         tenant: { id: 'ten_mock', name: 'Mock 租户', slug: 'mock' },
         authKind: 'jwt',
+        roles: [{ project_id: null, role: 'admin' }],
       },
     });
   }),
@@ -55,6 +56,134 @@ export const handlers = [
   http.get('*/v1/projects', () => {
     return HttpResponse.json({
       data: [{ id: 'prj_mock', name: 'Mock 项目', status: 'active' }],
+    });
+  }),
+
+  // ---------- F2 租户管理面 mock ----------
+  http.get('*/v1/admin/tenants/:tenantId/api-keys', () => {
+    return HttpResponse.json({
+      data: [
+        {
+          id: 'key_mock1', tenant_id: 'ten_mock', project_id: null, actor_id: 'usr_mock',
+          name: '演示密钥', prefix: 'dy_mock', scopes: ['gateway.chat'], status: 'active',
+          expires_at: null, last_used_at: Date.now() - 3600_000, created_at: Date.now() - 86400_000,
+          ip_allowlist: [], note: 'mock 演示',
+        },
+      ],
+    });
+  }),
+
+  http.post('*/v1/admin/tenants/:tenantId/api-keys', async ({ request }) => {
+    const body = (await request.json()) as { name?: string; scopes?: string[] };
+    return HttpResponse.json({
+      data: {
+        id: 'key_mock_new', tenant_id: 'ten_mock', project_id: null, actor_id: 'usr_mock',
+        name: body.name ?? '新密钥', prefix: 'dy_new', scopes: body.scopes ?? [],
+        status: 'active', expires_at: null, last_used_at: null, created_at: Date.now(),
+        ip_allowlist: [], note: null, key: 'dy_mock_secret_只显示一次',
+      },
+    }, { status: 201 });
+  }),
+
+  http.patch('*/v1/admin/tenants/:tenantId/api-keys/:keyId', async ({ request, params }) => {
+    const body = (await request.json()) as { ipAllowlist?: string[]; note?: string | null };
+    return HttpResponse.json({
+      data: {
+        id: params.keyId, tenant_id: 'ten_mock', project_id: null, actor_id: 'usr_mock',
+        name: '演示密钥', prefix: 'dy_mock', scopes: ['gateway.chat'], status: 'active',
+        expires_at: null, last_used_at: null, created_at: Date.now(),
+        ip_allowlist: body.ipAllowlist ?? [], note: body.note ?? null,
+      },
+    });
+  }),
+
+  http.post('*/v1/admin/tenants/:tenantId/api-keys/:keyId/rotate', async ({ request, params }) => {
+    const body = (await request.json()) as { graceHours?: number };
+    const gh = Math.min(720, Math.max(1, Number(body.graceHours) || 24));
+    const graceUntil = Date.now() + gh * 3600_000;
+    return HttpResponse.json({
+      data: {
+        oldKey: {
+          id: params.keyId, name: '演示密钥', status: 'active', expires_at: graceUntil,
+          rotated_to: 'key_mock_new', rotated_at: Date.now(),
+        },
+        newKey: {
+          id: 'key_mock_new', tenant_id: 'ten_mock', project_id: null, actor_id: 'usr_mock',
+          name: '演示密钥', prefix: 'dy_new', scopes: ['gateway.chat'], status: 'active',
+          expires_at: null, last_used_at: null, created_at: Date.now(),
+          ip_allowlist: [], note: null, secret: 'dy_mock_rotated_只显示一次',
+        },
+        graceUntil,
+      },
+    }, { status: 201 });
+  }),
+
+  http.delete('*/v1/admin/tenants/:tenantId/api-keys/:keyId', () => {
+    return HttpResponse.json({ data: { revoked: true } });
+  }),
+
+  http.get('*/v1/tenants/:tenantId/billing/invoices', () => {
+    return HttpResponse.json({
+      data: [
+        {
+          id: 'inv_mock1', tenant_id: 'ten_mock', period_key: '2026-09', status: 'draft',
+          currency: 'CNY', plan: 'professional', plan_fee_cents: 9900,
+          usage_cost_cents: 120, usage_tokens: 15000, usage_calls: 320, total_cents: 10020,
+          line_items: [
+            { type: 'plan', label: '套餐 professional（月费）', amount_cents: 9900 },
+            { type: 'usage', label: '模型调用（按量）', amount_cents: 120 },
+          ],
+          created_at: Date.now() - 86400_000, finalized_at: null, paid_at: null, voided_at: null,
+        },
+      ],
+    });
+  }),
+
+  http.post('*/v1/tenants/:tenantId/billing/invoices', async ({ request }) => {
+    const body = (await request.json()) as { period_key?: string };
+    return HttpResponse.json({
+      data: {
+        id: 'inv_mock_new', tenant_id: 'ten_mock', period_key: body.period_key ?? '2026-09',
+        status: 'draft', currency: 'CNY', plan: 'professional', plan_fee_cents: 9900,
+        usage_cost_cents: 120, usage_tokens: 15000, usage_calls: 320, total_cents: 10020,
+        line_items: [], created_at: Date.now(), finalized_at: null, paid_at: null, voided_at: null,
+      },
+    }, { status: 201 });
+  }),
+
+  http.get('*/v1/admin/tenants/:tenantId/budgets', () => {
+    return HttpResponse.json({
+      data: [
+        {
+          id: 'bud_mock1', tenant_id: 'ten_mock', project_id: null, period: 'monthly',
+          cost_limit_cents: 50000, token_limit: 10000000,
+          used_cost_cents: 120, used_tokens: 15000, source: 'plan',
+          created_at: Date.now() - 86400_000, updated_at: Date.now() - 3600_000,
+        },
+      ],
+    });
+  }),
+
+  http.put('*/v1/admin/tenants/:tenantId/budgets', async ({ request }) => {
+    const body = (await request.json()) as { costLimitCents?: number | null; tokenLimit?: number | null };
+    return HttpResponse.json({
+      data: {
+        id: 'bud_mock1', tenant_id: 'ten_mock', project_id: null, period: 'monthly',
+        cost_limit_cents: body.costLimitCents ?? null, token_limit: body.tokenLimit ?? null,
+        used_cost_cents: 120, used_tokens: 15000, source: 'manual',
+        created_at: Date.now() - 86400_000, updated_at: Date.now(),
+      },
+    });
+  }),
+
+  http.get('*/v1/admin/tenants/:tenantId/usage', () => {
+    return HttpResponse.json({
+      data: [
+        {
+          id: 'call_mock1', model: 'qwen-max', tokens: 1200, cost_cents: 2,
+          status: 'ok', created_at: Date.now() - 3600_000,
+        },
+      ],
     });
   }),
 ];

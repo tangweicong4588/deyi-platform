@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { isTenantAdmin } from '../api/settings';
 import './AppLayout.css';
 
 const NAV = [
@@ -9,9 +10,16 @@ const NAV = [
   { to: '/usage', label: '用量' },
 ];
 
+const ADMIN_NAV = [
+  { to: '/settings/keys', label: 'API 密钥' },
+  { to: '/settings/billing', label: '账单' },
+  { to: '/settings/quotas', label: '配额用量' },
+];
+
 export function AppLayout() {
   const { me, projects, projectId, selectProject, logout } = useAuth();
   const navigate = useNavigate();
+  const showAdmin = isTenantAdmin(me);
 
   const onLogout = () => {
     logout();
@@ -28,6 +36,16 @@ export function AppLayout() {
               {n.label}
             </NavLink>
           ))}
+          {showAdmin && (
+            <>
+              <div className="layout__section">管理</div>
+              {ADMIN_NAV.map((n) => (
+                <NavLink key={n.to} to={n.to} className={({ isActive }) => `layout__link${isActive ? ' is-active' : ''}`}>
+                  {n.label}
+                </NavLink>
+              ))}
+            </>
+          )}
         </nav>
         <div className="layout__foot">
           <div className="layout__who">
