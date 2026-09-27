@@ -158,6 +158,20 @@ export function decideBuiltin(input) {
       : deny('任务域写入需要 operator 角色');
   }
 
+  // R6d: 发布域 —— release.read 需 viewer+，release.write 需 operator+
+  if (action === 'release.read') {
+    const pj10 = requireProject(); if (pj10) return pj10;
+    return rankOf(actor.roles, project.id) >= 0
+      ? allow('发布域读取（viewer+）')
+      : deny('发布域读取需要 viewer 角色');
+  }
+  if (action === 'release.write') {
+    const pj11 = requireProject(); if (pj11) return pj11;
+    return rankOf(actor.roles, project.id) >= 1
+      ? allow('发布域写入（operator+）')
+      : deny('发布域写入需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }

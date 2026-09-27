@@ -51,6 +51,7 @@ const TABLE_DELETE_ORDER = [
   'business_actions', 'ontology_terms', 'pull_requests', 'pipeline_runs', 'canonical_docs',
   'pipeline_instances', 'pipeline_template_versions', 'pipeline_templates',
   'biz_task_transitions', 'biz_tasks',
+  'release_steps', 'releases', 'deploy_environments',
   'notify_channels', 'memories', 'repo_bindings', 'documents', 'tools',
   'business_plans', 'change_packages',
   'requirements', 'business_intents',

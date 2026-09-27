@@ -19,6 +19,7 @@ import { registerEvidenceRoutes } from './modules/evidence/routes.mjs';
 import { registerDeliveryRoutes } from './modules/delivery/routes.mjs';
 import { registerBusinessRoutes } from './modules/business/routes.mjs';
 import { registerTaskRoutes } from './modules/tasks/routes.mjs';
+import { registerReleaseRoutes } from './modules/release/routes.mjs';
 import { registerNotifyRoutes } from './modules/notify/routes.mjs';
 import { registerMemoryRoutes } from './modules/memory/routes.mjs';
 import { registerBillingRoutes } from './modules/billing/routes.mjs';
@@ -66,6 +67,7 @@ async function main() {
   registerDeliveryRoutes(app);
   registerBusinessRoutes(app);
   registerTaskRoutes(app);
+  registerReleaseRoutes(app);
   registerNotifyRoutes(app);
   registerMemoryRoutes(app);
   registerBillingRoutes(app);
