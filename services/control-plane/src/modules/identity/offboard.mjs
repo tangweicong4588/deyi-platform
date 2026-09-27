@@ -52,6 +52,7 @@ const TABLE_DELETE_ORDER = [
   'pipeline_instances', 'pipeline_template_versions', 'pipeline_templates',
   'biz_task_transitions', 'biz_tasks',
   'release_steps', 'releases', 'deploy_environments',
+  'agent_run_steps', 'agent_approvals', 'agent_runs', 'agent_versions', 'agents',
   'notify_channels', 'memories', 'repo_bindings', 'documents', 'tools',
   'business_plans', 'change_packages',
   'requirements', 'business_intents',

@@ -172,6 +172,20 @@ export function decideBuiltin(input) {
       : deny('发布域写入需要 operator 角色');
   }
 
+  // R6e: Agent 域 —— agent.read 需 viewer+，agent.write 需 operator+
+  if (action === 'agent.read') {
+    const pj12 = requireProject(); if (pj12) return pj12;
+    return rankOf(actor.roles, project.id) >= 0
+      ? allow('Agent 域读取（viewer+）')
+      : deny('Agent 域读取需要 viewer 角色');
+  }
+  if (action === 'agent.write') {
+    const pj13 = requireProject(); if (pj13) return pj13;
+    return rankOf(actor.roles, project.id) >= 1
+      ? allow('Agent 域写入（operator+）')
+      : deny('Agent 域写入需要 operator 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }
