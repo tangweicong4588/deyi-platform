@@ -191,6 +191,8 @@ export const handlers = [
   ...f1Handlers(),
   // ---------- F3 软件生产 mock（内存数据，演示可写） ----------
   ...f3Handlers(),
+  // ---------- F4 平台运营后台 mock（内存数据，演示可写） ----------
+  ...f4Handlers(),
 ];
 
 // ---- F1 mock 数据与 handlers：任务 / 知识库 / 记忆 ----
@@ -477,5 +479,139 @@ function f3Handlers() {
         time_to_restore: { median_hours: 4, count: 3, unrecovered: 1 },
       } });
     }),
+  ];
+}
+
+// ---- F4 mock 数据与 handlers：平台运营后台 ----
+// 注意：module 级内存数据，dev server 热重载时重置；仅供离线演示。
+let mockTenantSeq = 3;
+const mockTenants: Array<Record<string, unknown>> = [
+  { id: 'ten_demo1', name: '演示租户A', slug: 'demo-a', status: 'active', plan: 'professional', quotas: {}, created_at: now() - 40 * 86400_000, updated_at: now() - 86400_000 },
+  { id: 'ten_demo2', name: '演示租户B', slug: 'demo-b', status: 'suspended', plan: 'trial', quotas: {}, created_at: now() - 10 * 86400_000, updated_at: now() - 3600_000 },
+];
+
+function f4Handlers() {
+  return [
+    // 租户生命周期
+    http.get('*/v1/admin/tenants', () => HttpResponse.json({ data: mockTenants })),
+    http.post('*/v1/admin/tenants', async ({ request }) => {
+      const body = (await request.json()) as { name?: string; slug?: string; plan?: string };
+      if (!body.name) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: 'name 必填' } }, { status: 400 });
+      }
+      const t = {
+        id: `ten_mock${mockTenantSeq++}`, name: body.name, slug: body.slug ?? `mock-${mockTenantSeq}`,
+        status: 'active', plan: body.plan ?? 'trial', quotas: {}, created_at: now(), updated_at: now(),
+      };
+      mockTenants.push(t);
+      return HttpResponse.json({ data: t }, { status: 201 });
+    }),
+    http.post('*/v1/admin/tenants/provision', async ({ request }) => {
+      const body = (await request.json()) as { name?: string; plan?: string; adminName?: string };
+      const t = {
+        id: `ten_mock${mockTenantSeq++}`, name: body.name ?? 'mock', slug: `mock-${mockTenantSeq}`,
+        status: 'active', plan: body.plan ?? 'trial', quotas: {}, created_at: now(), updated_at: now(),
+      };
+      mockTenants.push(t);
+      return HttpResponse.json({
+        data: {
+          tenant: t,
+          project: { id: 'proj_mock', name: 'default' },
+          actor: { id: 'act_mock', name: body.adminName ?? 'admin' },
+          apiKey: { id: 'key_mock', name: 'provisioned-admin', prefix: 'dyk_mock', key: 'dyk_mock_secret_演示密钥只显示一次' },
+        },
+      }, { status: 201 });
+    }),
+    http.patch('*/v1/admin/tenants/:tenantId', async ({ request, params }) => {
+      const t = mockTenants.find((x) => x.id === params.tenantId);
+      if (!t) return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '租户不存在' } }, { status: 404 });
+      const body = (await request.json()) as { plan?: string; quotas?: Record<string, number | null> };
+      if (body.plan) t.plan = body.plan;
+      if (body.quotas) t.quotas = body.quotas;
+      t.updated_at = now();
+      return HttpResponse.json({ data: t });
+    }),
+    http.post('*/v1/admin/tenants/:tenantId/suspend', ({ params }) => {
+      const t = mockTenants.find((x) => x.id === params.tenantId);
+      if (!t) return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '租户不存在' } }, { status: 404 });
+      t.status = 'suspended';
+      return HttpResponse.json({ data: t });
+    }),
+    http.post('*/v1/admin/tenants/:tenantId/resume', ({ params }) => {
+      const t = mockTenants.find((x) => x.id === params.tenantId);
+      if (!t) return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '租户不存在' } }, { status: 404 });
+      t.status = 'active';
+      return HttpResponse.json({ data: t });
+    }),
+    // 销户：两阶段
+    http.post('*/v1/admin/tenants/:tenantId/offboard', async ({ request, params }) => {
+      const body = (await request.json()) as { phase?: string; confirm_token?: string };
+      if (body.phase === 'confirm') {
+        return HttpResponse.json({
+          data: {
+            phase: 'confirm', tenant_id: params.tenantId, purged_at: now(),
+            deleted_tables: { projects: 1, actors: 2, audit_events: 120 },
+            audit: { wiped_events: 120, checkpoint_id: 'ae_mock_cp', offboard_event_id: 'ae_mock_off' },
+            vectors: { memory: { deleted: 5 }, knowledge: { deleted: 3 } },
+            artifact_blobs: { removed: 2 },
+          },
+        });
+      }
+      return HttpResponse.json({
+        data: {
+          phase: 'dryRun', tenant_id: params.tenantId, tenant_status: 'suspended',
+          counts: { projects: 1, actors: 2, audit_events: 120, biz_tasks: 8 },
+          total_rows_to_delete: 131,
+          kept: { billing_invoices: 3, anchors: 1, note: '账单头与外部锚定引用保留' },
+          export_manifest: {
+            filename: 'audit-export.jsonl', format: 'jsonl', event_count: 120, truncated: false,
+            content_sha256: 'mocksha256', chain_verification: 'ok', latest_anchor: null,
+          },
+          confirm_token: 'mock_confirm_token_演示',
+          confirm_token_ttl_ms: 15 * 60_000,
+        },
+      });
+    }),
+    // 合规导出：裸文件流 + x-audit-manifest 头（与真实后端一致）
+    http.get('*/v1/admin/tenants/:tenantId/compliance/export', ({ request, params }) => {
+      const url = new URL(request.url);
+      const format = url.searchParams.get('format') ?? 'jsonl';
+      const content = format === 'csv'
+        ? 'seq,action,actor_id\n1,tenant.create,operator\n'
+        : '{"seq":1,"action":"tenant.create"}\n';
+      const manifest = {
+        filename: `audit-${params.tenantId}.${format}`, format, event_count: 1, truncated: false,
+        content_sha256: 'mocksha256', chain_verification: 'ok', latest_anchor: null,
+      };
+      const manifestJson = JSON.stringify(manifest);
+      // 浏览器安全 base64（manifest 含中文时先做 UTF-8 编码）
+      const manifestB64 = btoa(
+        Array.from(new TextEncoder().encode(manifestJson), (b) => String.fromCharCode(b)).join(''),
+      );
+      return new HttpResponse(content, {
+        headers: {
+          'content-type': format === 'csv' ? 'text/csv' : 'application/x-ndjson',
+          'content-disposition': `attachment; filename="${manifest.filename}"`,
+          'x-audit-manifest': manifestB64,
+        },
+      });
+    }),
+    http.get('*/v1/admin/tenants/:tenantId/evidence/anchor', () =>
+      HttpResponse.json({ data: { anchored: true, latest_seq: 120 } })),
+    http.get('*/v1/admin/tenants/:tenantId/evidence/anchor/verify', () =>
+      HttpResponse.json({ data: { anchored: true, broken: false, checked_through: 120 } })),
+    http.post('*/v1/admin/anchor-all', () =>
+      HttpResponse.json({ data: { anchored: true, tenants: mockTenants.length, results: [] } })),
+    // 保留清扫
+    http.post('*/v1/admin/retention/sweep', async ({ request }) => {
+      const body = (await request.json()) as { tenantId?: string; dryRun?: boolean };
+      return HttpResponse.json({
+        data: { dry_run: body.dryRun === true, tenants: 2, results: [{ tenant_id: 'ten_demo1', ok: true, deleted: 0 }] },
+      });
+    }),
+    // 健康检查
+    http.get('*/healthz', () => HttpResponse.json({ status: 'alive' })),
+    http.get('*/readyz', () =>
+      HttpResponse.json({ status: 'ready', checks: { db: 'ok' }, adapters: {} })),
   ];
 }

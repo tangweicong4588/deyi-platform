@@ -1,0 +1,82 @@
+/* F4 平台运营后台样式 */
+.ops-login {
+  max-width: 560px;
+  margin: 12vh auto 0;
+  padding: 0 16px;
+}
+
+.ops-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.ops-shell__side {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--color-line);
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: #fafbfc;
+}
+
+.ops-shell__brand {
+  font-weight: 700;
+  font-size: 16px;
+  padding: 0 8px;
+}
+
+.ops-shell__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ops-shell__nav a {
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: var(--color-ink-700);
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.ops-shell__nav a:hover {
+  background: var(--color-ink-100, #eef1f5);
+}
+
+.ops-shell__nav a.is-active {
+  background: var(--color-primary-600);
+  color: #fff;
+}
+
+.ops-shell__foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ops-shell__main {
+  flex: 1;
+  padding: 24px;
+  max-width: 1100px;
+}
+
+.ops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 12px 0;
+}
+
+.ops-table th,
+.ops-table td {
+  border: 1px solid var(--color-line);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.ops-table th {
+  background: #fafbfc;
+}

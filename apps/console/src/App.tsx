@@ -15,6 +15,13 @@ import { PipelinesPage } from './pages/deliver/PipelinesPage';
 import { ReleasesPage } from './pages/deliver/ReleasesPage';
 import { ArtifactsPage } from './pages/deliver/ArtifactsPage';
 import { DoraPage } from './pages/deliver/DoraPage';
+import { OpsAuthProvider } from './auth/OpsAuthContext';
+import { OpsLoginPage, OpsProtectedRoute } from './auth/OpsLogin';
+import { OpsLayout } from './pages/ops/OpsLayout';
+import { TenantsPage } from './pages/ops/TenantsPage';
+import { OffboardPage } from './pages/ops/OffboardPage';
+import { AuditPage } from './pages/ops/AuditPage';
+import { PlatformPage } from './pages/ops/PlatformPage';
 
 export function App() {
   return (
@@ -43,8 +50,34 @@ export function App() {
           <Route path="deliver/artifacts" element={<ArtifactsPage />} />
           <Route path="deliver/dora" element={<DoraPage />} />
         </Route>
+        <Route path="/ops/*" element={<OpsRoutes />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AuthProvider>
+  );
+}
+
+function OpsRoutes() {
+  return (
+    <OpsAuthProvider>
+      <Routes>
+        <Route path="login" element={<OpsLoginPage />} />
+        <Route
+          path="/"
+          element={
+            <OpsProtectedRoute>
+              <OpsLayout />
+            </OpsProtectedRoute>
+          }
+        >
+          <Route index element={<Navigate to="tenants" replace />} />
+          <Route path="tenants" element={<TenantsPage />} />
+          <Route path="offboard" element={<OffboardPage />} />
+          <Route path="audit" element={<AuditPage />} />
+          <Route path="platform" element={<PlatformPage />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/ops" replace />} />
+      </Routes>
+    </OpsAuthProvider>
   );
 }

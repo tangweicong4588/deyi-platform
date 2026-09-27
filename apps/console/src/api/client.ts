@@ -57,4 +57,22 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
 
 export const get = <T>(path: string, opts?: Options) => api<T>(path, { ...opts, method: 'GET' });
 export const post = <T>(path: string, body?: unknown, opts?: Options) => api<T>(path, { ...opts, method: 'POST', body });
+export const patch = <T>(path: string, body?: unknown, opts?: Options) => api<T>(path, { ...opts, method: 'PATCH', body });
 export const del = <T>(path: string, opts?: Options) => api<T>(path, { ...opts, method: 'DELETE' });
+
+/**
+ * 裸 Response 获取（下载类接口：合规导出等非 {data} 信封的响应）。
+ * 只在 !res.ok 时按错误信封解析并抛 ApiError，成功时把 Response 交给调用方。
+ */
+export async function fetchRaw(path: string, opts: Options = {}): Promise<Response> {
+  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+  if (opts.token) headers['authorization'] = `Bearer ${opts.token}`;
+  const res = await fetch(BASE + path, { method: opts.method ?? 'GET', headers });
+  if (!res.ok) {
+    let json: any = null;
+    try { json = await res.json(); } catch { /* ignore */ }
+    const err = json?.error ?? {};
+    throw new ApiError(res.status, err.code ?? 'HTTP_ERROR', err.message ?? `请求失败（${res.status}）`, err.details);
+  }
+  return res;
+}
