@@ -83,7 +83,7 @@ export interface Invoice {
   id: string;
   period_key: string;
   status: string;
-  amount_cents: number;
+  total_cents: number; // 与后端 billing_invoices.total_cents 同口径
   currency: string;
   created_at: number;
 }

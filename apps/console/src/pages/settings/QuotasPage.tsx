@@ -47,8 +47,8 @@ export function QuotasPage() {
         quotasApi.budgets(token, tenantId),
         quotasApi.usage(token, tenantId, 50),
       ]);
-      setBudgets(b);
-      setCalls(u);
+      setBudgets(b ?? []);
+      setCalls(u ?? []);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '加载失败');
     } finally {

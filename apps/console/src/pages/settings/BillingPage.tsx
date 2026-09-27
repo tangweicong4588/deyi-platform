@@ -32,7 +32,7 @@ export function BillingPage() {
     setLoading(true);
     setError(null);
     try {
-      setInvoices(await billingApi.list(token, tenantId));
+      setInvoices((await billingApi.list(token, tenantId)) ?? []);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '加载失败');
     } finally {

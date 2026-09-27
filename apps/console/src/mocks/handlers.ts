@@ -186,4 +186,168 @@ export const handlers = [
       ],
     });
   }),
+
+  // ---------- F1 业务面 mock（内存数据，演示可写） ----------
+  ...f1Handlers(),
 ];
+
+// ---- F1 mock 数据与 handlers：任务 / 知识库 / 记忆 ----
+// 注意：module 级内存数据，dev server 热重载时重置；仅供离线演示。
+const now = () => Date.now();
+let mockTaskSeq = 3;
+const mockTasks: Array<Record<string, unknown>> = [
+  {
+    id: 'tsk_mock1', kind: 'ticket', title: '演示工单：对接客户 SSO', description: '演示数据',
+    status: 'in_progress', priority: 'high', assignee_id: 'usr_mock', escalated: 0,
+    created_by: 'usr_mock', created_at: now() - 7200_000, updated_at: now() - 3600_000, closed_at: null,
+  },
+  {
+    id: 'tsk_mock2', kind: 'approval', title: '演示审批单：发布 v0.2.0', description: '演示数据',
+    status: 'pending', priority: 'normal', assignee_id: null, escalated: 0,
+    created_by: 'usr_mock', created_at: now() - 3600_000, updated_at: now() - 3600_000, closed_at: null,
+  },
+];
+const mockTransitions: Record<string, Array<Record<string, unknown>>> = {
+  tsk_mock1: [
+    { id: 'tr_mock1', from_status: 'open', to_status: 'in_progress', actor_id: 'usr_mock', note: null, created_at: now() - 3600_000 },
+  ],
+  tsk_mock2: [],
+};
+const findTask = (id: string) => mockTasks.find((t) => t.id === id);
+
+let mockDocSeq = 2;
+const mockDocs: Array<{ id: string; title: string; content: string; mime: string; status: string; version: number; created_at: number }> = [
+  { id: 'doc_mock1', title: '演示文档：平台介绍', content: '得逸智行企业级 AI 交付与执行平台，演示用文档。', mime: 'text/markdown', status: 'ready', version: 1, created_at: now() - 86400_000 },
+];
+
+let mockMemSeq = 2;
+const mockMems: Array<Record<string, unknown>> = [
+  { id: 'mem_mock1', kind: 'semantic', visibility: 'private', content: '演示记忆：客户偏好简洁汇报', created_at: now() - 86400_000 },
+];
+
+function f1Handlers() {
+  return [
+    // 业务任务
+    http.get('*/v1/projects/:projectId/tasks', () => {
+      return HttpResponse.json({ data: mockTasks });
+    }),
+    http.post('*/v1/projects/:projectId/tasks', async ({ request }) => {
+      const body = (await request.json()) as { kind?: string; title?: string; description?: string; priority?: string };
+      if (!body.title?.trim()) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: '标题必填' } }, { status: 400 });
+      }
+      const task: Record<string, unknown> = {
+        id: `tsk_mock${mockTaskSeq++}`, kind: body.kind ?? 'ticket', title: body.title.trim(),
+        description: body.description?.trim() ?? '', status: 'open', priority: body.priority ?? 'normal',
+        assignee_id: null, escalated: 0, created_by: 'usr_mock',
+        created_at: now(), updated_at: now(), closed_at: null,
+      };
+      mockTasks.unshift(task);
+      mockTransitions[task.id as string] = [];
+      return HttpResponse.json({ data: task }, { status: 201 });
+    }),
+    http.get('*/v1/projects/:projectId/tasks/:taskId', ({ params }) => {
+      const task = findTask(params.taskId as string);
+      if (!task) {
+        return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '任务不存在' } }, { status: 404 });
+      }
+      return HttpResponse.json({ data: { task, transitions: mockTransitions[task.id as string] ?? [] } });
+    }),
+    http.post('*/v1/projects/:projectId/tasks/:taskId/transition', async ({ request, params }) => {
+      const task = findTask(params.taskId as string);
+      if (!task) {
+        return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '任务不存在' } }, { status: 404 });
+      }
+      const body = (await request.json()) as { to?: string; note?: string | null };
+      const from = task.status as string;
+      task.status = body.to ?? from;
+      task.updated_at = now();
+      (mockTransitions[task.id as string] ??= []).push({
+        id: `tr_mock${now()}`, from_status: from, to_status: task.status,
+        actor_id: 'usr_mock', note: body.note ?? null, created_at: now(),
+      });
+      return HttpResponse.json({ data: task });
+    }),
+    http.post('*/v1/projects/:projectId/tasks/:taskId/decide', async ({ request, params }) => {
+      const task = findTask(params.taskId as string);
+      if (!task) {
+        return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '任务不存在' } }, { status: 404 });
+      }
+      const body = (await request.json()) as { approved?: boolean; note?: string | null };
+      const from = task.status as string;
+      // mock 演示：跳过 SoD（真实后端会校验发起人不能自批）
+      task.status = body.approved ? 'resolved' : 'cancelled';
+      task.updated_at = now();
+      if (task.status === 'cancelled') task.closed_at = now();
+      (mockTransitions[task.id as string] ??= []).push({
+        id: `tr_mock${now()}`, from_status: from, to_status: task.status,
+        actor_id: 'usr_mock', note: body.note ?? null, created_at: now(),
+      });
+      return HttpResponse.json({ data: task });
+    }),
+
+    // 知识库
+    http.get('*/v1/projects/:projectId/knowledge/documents', () => {
+      return HttpResponse.json({
+        data: mockDocs.map(({ content: _c, ...d }) => d),
+      });
+    }),
+    http.post('*/v1/projects/:projectId/knowledge/documents', async ({ request }) => {
+      const body = (await request.json()) as { title?: string; content?: string; mime?: string };
+      if (!body.title?.trim() || !body.content?.trim()) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: '标题和内容必填' } }, { status: 400 });
+      }
+      const doc = {
+        id: `doc_mock${mockDocSeq++}`, title: body.title.trim(), content: body.content,
+        mime: body.mime ?? 'text/markdown', status: 'ready', version: 1, created_at: now(),
+      };
+      mockDocs.unshift(doc);
+      const { content: _c, ...rest } = doc;
+      return HttpResponse.json({ data: { document: { id: doc.id }, ...rest } }, { status: 201 });
+    }),
+    http.post('*/v1/projects/:projectId/knowledge/search', async ({ request }) => {
+      const body = (await request.json()) as { query?: string; limit?: number };
+      const q = (body.query ?? '').trim();
+      const limit = Math.min(50, Math.max(1, Number(body.limit) || 5));
+      const hits = mockDocs
+        .filter((d) => !q || d.title.includes(q) || d.content.includes(q))
+        .slice(0, limit)
+        .map((d, i) => ({
+          docId: d.id, title: d.title, score: 1 - i * 0.1,
+          snippet: d.content.slice(0, 120),
+        }));
+      return HttpResponse.json({ data: hits });
+    }),
+
+    // 记忆
+    http.post('*/v1/tenants/:tenantId/memory', async ({ request }) => {
+      const body = (await request.json()) as { content?: string; kind?: string; visibility?: string };
+      if (!body.content?.trim()) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: '内容必填' } }, { status: 400 });
+      }
+      const item: Record<string, unknown> = {
+        id: `mem_mock${mockMemSeq++}`, kind: body.kind ?? 'episodic',
+        visibility: body.visibility ?? 'private', content: body.content.trim(), created_at: now(),
+      };
+      mockMems.unshift(item);
+      return HttpResponse.json({ data: item }, { status: 201 });
+    }),
+    http.get('*/v1/tenants/:tenantId/memory/recall', ({ request }) => {
+      const url = new URL(request.url);
+      const q = (url.searchParams.get('q') ?? '').trim();
+      const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 10));
+      const items = mockMems
+        .filter((m) => !q || q === '*' || String(m.content).includes(q))
+        .slice(0, limit);
+      return HttpResponse.json({ data: { items, mode: 'keyword' } });
+    }),
+    http.delete('*/v1/tenants/:tenantId/memory/:memoryId', ({ params }) => {
+      const idx = mockMems.findIndex((m) => m.id === params.memoryId);
+      if (idx < 0) {
+        return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '记忆不存在' } }, { status: 404 });
+      }
+      mockMems.splice(idx, 1);
+      return HttpResponse.json({ data: { deleted: true } });
+    }),
+  ];
+}

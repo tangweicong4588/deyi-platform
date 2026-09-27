@@ -81,7 +81,7 @@ export function ApiKeysPage() {
     setLoading(true);
     setError(null);
     try {
-      setKeys(await apiKeysApi.list(token, tenantId));
+      setKeys((await apiKeysApi.list(token, tenantId)) ?? []);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '加载失败');
     } finally {

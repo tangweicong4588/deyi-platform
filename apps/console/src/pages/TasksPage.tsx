@@ -31,7 +31,7 @@ export function TasksPage() {
     setLoading(true);
     setError(null);
     try {
-      setItems(await tasksApi.list(token, projectId));
+      setItems((await tasksApi.list(token, projectId)) ?? []);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '加载失败');
     } finally {

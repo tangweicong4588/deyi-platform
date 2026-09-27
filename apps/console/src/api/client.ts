@@ -44,8 +44,13 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
     const err = json?.error ?? {};
     throw new ApiError(res.status, err.code ?? 'HTTP_ERROR', err.message ?? `请求失败（${res.status}）`, err.details);
   }
+  // 防御：200 但 body 不是对象（例如 mock 未覆盖的路径被 dev server 回退到 index.html，
+  // res.json() 解析失败 json=null）——直接抛错，避免调用方拿到 null 后渲染白屏。
+  if (json === null || typeof json !== 'object') {
+    throw new ApiError(res.status, 'EMPTY_RESPONSE', '服务端返回了空响应');
+  }
   // 后端统一信封 { data }；兼容直接返回体的 mock
-  return (json && typeof json === 'object' && 'data' in json ? json.data : json) as T;
+  return ('data' in json ? json.data : json) as T;
 }
 
 export const get = <T>(path: string, opts?: Options) => api<T>(path, { ...opts, method: 'GET' });

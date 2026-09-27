@@ -27,7 +27,7 @@ export function KnowledgePage() {
     if (!token || !projectId) return;
     setLoading(true);
     try {
-      setDocs(await knowledgeApi.list(token, projectId));
+      setDocs((await knowledgeApi.list(token, projectId)) ?? []);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '加载失败');
     } finally {
@@ -64,7 +64,7 @@ export function KnowledgePage() {
     setSearching(true);
     setError(null);
     try {
-      setHits(await knowledgeApi.search(token, projectId, query.trim()));
+      setHits((await knowledgeApi.search(token, projectId, query.trim())) ?? []);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '检索失败');
     } finally {

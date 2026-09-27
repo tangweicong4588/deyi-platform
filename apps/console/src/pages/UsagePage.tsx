@@ -19,7 +19,7 @@ export function UsagePage() {
     setLoading(true);
     setError(null);
     try {
-      setInvoices(await billingApi.invoices(token, tenantId));
+      setInvoices((await billingApi.invoices(token, tenantId)) ?? []);
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
         setError('账单查看需要租户管理员角色');
@@ -45,7 +45,7 @@ export function UsagePage() {
               {invoices.map((inv) => (
                 <tr key={inv.id}>
                   <td>{inv.period_key}</td>
-                  <td>{(inv.amount_cents / 100).toFixed(2)} {inv.currency}</td>
+                  <td>{(inv.total_cents / 100).toFixed(2)} {inv.currency}</td>
                   <td><span className="status-pill">{inv.status}</span></td>
                   <td>{new Date(inv.created_at).toLocaleString()}</td>
                 </tr>

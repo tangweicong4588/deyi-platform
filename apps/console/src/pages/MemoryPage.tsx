@@ -26,8 +26,8 @@ export function MemoryPage() {
     setError(null);
     try {
       const r = await memoryApi.recall(token, tenantId, q || '*', 20);
-      setItems(r.items);
-      setMode(r.mode);
+      setItems(r?.items ?? []);
+      setMode(r?.mode ?? '');
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '检索失败');
     } finally {
