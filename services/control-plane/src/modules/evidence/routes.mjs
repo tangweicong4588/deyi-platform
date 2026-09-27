@@ -10,10 +10,11 @@ import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx } from '../../kernel/context.mjs';
 import { db } from '../../db/index.mjs';
-import { authenticate, tenantScope, requireTenantRole } from '../identity/middleware.mjs';
+import { authenticate, tenantScope, requireTenantRole, requireOperator } from '../identity/middleware.mjs';
 import { verifyChain } from './audit.mjs';
 import { buildPackage, verifyPackage, downloadPackage } from './packages.mjs';
-import { anchorChain, getAnchorStatus } from './anchor.mjs';
+import { anchorChain, getAnchorStatus, verifyAnchors, anchorAllTenants } from './anchor.mjs';
+import { exportAudit } from './compliance.mjs';
 import { queryCost } from './cost.mjs';
 
 export function registerEvidenceRoutes(app) {
@@ -74,6 +75,30 @@ export function registerEvidenceRoutes(app) {
   // 锚定状态 / 触发锚定
   app.get(base + '/anchor', authenticate, tenantScope, requireTenantRole('viewer'),
     async (req, res) => sendJson(res, 200, { data: await getAnchorStatus(req.params.tenantId) }));
+  // 锚定验证（V2.4）：锚定后链被改写即检出 broken
+  app.get(base + '/anchor/verify', authenticate, tenantScope, requireTenantRole('operator'),
+    async (req, res) => sendJson(res, 200, { data: await verifyAnchors(req.params.tenantId) }));
+
+  // 合规导出（V2.4）：审计事件 JSONL/CSV 下载 + manifest（sha256 + 导出时刻链验证结论）
+  app.get('/v1/admin/tenants/:tenantId/compliance/export',
+    authenticate, tenantScope, requireTenantRole('admin'),
+    async (req, res) => {
+      const { from = null, to = null, format = 'jsonl' } = req.query;
+      const out = await exportAudit(req.params.tenantId, {
+        from: from ? Number(from) : null, to: to ? Number(to) : null, format,
+      });
+      res.setHeader('content-type', out.contentType);
+      res.setHeader('content-disposition', `attachment; filename="${out.filename}"`);
+      res.setHeader('x-audit-manifest',
+        Buffer.from(JSON.stringify(out.manifest), 'utf8').toString('base64'));
+      res.end(out.content);
+    });
+
+  // 全租户锚定跑批（V2.4，平台 operator）
+  app.post('/v1/admin/anchor-all', authenticate, requireOperator,
+    async (req, res) => sendJson(res, 200, {
+      data: await anchorAllTenants({ actorId: ctx().actorId }),
+    }));
   app.post(base + '/anchor', authenticate, tenantScope, requireTenantRole('operator'),
     async (req, res) => {
       try {
