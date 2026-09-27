@@ -22,6 +22,7 @@ async function fromApiKey(secret) {
   return {
     authKind: 'api_key', tenantId: tenant.id, actorId: actor.id, actorKind: actor.kind,
     projectId: key.project_id || null, roles: bindings,
+    keyId: key.id, keyScopes: Array.isArray(key.scopes) ? key.scopes : [],
   };
 }
 
@@ -103,6 +104,26 @@ export function requireTenantRole(minRole) {
     if (c.authKind === 'operator') return next();
     if (!c.tenantId) throw Errors.unauthorized();
     if (effectiveRank(c.roles, null) < min) throw Errors.forbidden(`需要租户级 ${minRole} 角色`);
+    await next();
+  };
+}
+
+/**
+ * V2.5：key 级细粒度权限守卫。
+ * - operator（平台运维）与 JWT（走 IdP/角色体系）不受 key scope 限制；
+ * - API Key 未设置 scopes（空数组）= 不限制，向后兼容所有历史 key；
+ * - 一旦设置 scopes，key 必须拥有任一所列 scope 才能进入该路由。
+ */
+export function requireScope(...scopes) {
+  return async (req, res, next) => {
+    const c = ctx();
+    if (c.authKind !== 'api_key') return next();
+    const ks = c.keyScopes || [];
+    if (ks.length === 0) return next(); // 未设置 = 不限制（向后兼容）
+    if (!scopes.some((s) => ks.includes(s))) {
+      throw Errors.forbidden(`API Key 缺少所需 scope（需要其一：${scopes.join(' / ')}）`,
+        { code: 'INSUFFICIENT_SCOPE' });
+    }
     await next();
   };
 }

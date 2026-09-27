@@ -28,6 +28,9 @@ export function runWithContext(ctx, fn) {
     actorKind: ctx.actorKind || null,
     authKind: ctx.authKind || null, // 'api_key' | 'jwt' | 'bootstrap' | null(匿名)
     roles: ctx.roles || [],
+    // V2.5：API Key 级细粒度 scope（仅 api_key 认证时有；空数组 = 未设置 = 不限制）
+    keyId: ctx.keyId || null,
+    keyScopes: Array.isArray(ctx.keyScopes) ? ctx.keyScopes : [],
   };
   return als.run(full, fn);
 }

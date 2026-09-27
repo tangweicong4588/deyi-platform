@@ -10,7 +10,7 @@ import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx } from '../../kernel/context.mjs';
 import { db } from '../../db/index.mjs';
-import { authenticate, tenantScope, requireTenantRole, requireOperator } from '../identity/middleware.mjs';
+import { authenticate, tenantScope, requireTenantRole, requireOperator, requireScope } from '../identity/middleware.mjs';
 import { verifyChain } from './audit.mjs';
 import { buildPackage, verifyPackage, downloadPackage } from './packages.mjs';
 import { anchorChain, getAnchorStatus, verifyAnchors, anchorAllTenants } from './anchor.mjs';
@@ -81,7 +81,7 @@ export function registerEvidenceRoutes(app) {
 
   // 合规导出（V2.4）：审计事件 JSONL/CSV 下载 + manifest（sha256 + 导出时刻链验证结论）
   app.get('/v1/admin/tenants/:tenantId/compliance/export',
-    authenticate, tenantScope, requireTenantRole('admin'),
+    authenticate, tenantScope, requireTenantRole('admin'), requireScope('evidence.read'),
     async (req, res) => {
       const { from = null, to = null, format = 'jsonl' } = req.query;
       const out = await exportAudit(req.params.tenantId, {

@@ -47,6 +47,28 @@ export function mintKey() {
 /** 测试钩子：覆盖 pepper 链（模拟轮换），传 null 恢复走 config */
 export const __internal = { setPepperChain: (c) => { pepperChainOverride = c; } };
 
+// ---------- V2.5：细粒度 scope ----------
+// 语义：key.scopes 为空数组 = 不限制（向后兼容，所有历史 key 不受影响）；
+// 一旦设置了 scopes，该 key 只能访问对应 scope 的路由（requireScope 中间件强制）。
+export const KEY_SCOPES = [
+  'gateway.chat', 'gateway.embeddings',
+  'knowledge.read', 'knowledge.write',
+  'memory.read', 'memory.write',
+  'billing.read', 'billing.write',
+  'evidence.read', 'evidence.write',
+  'identity.keys', // key 管理：签发/轮换/吊销
+];
+
+export function assertValidScopes(scopes) {
+  if (!Array.isArray(scopes)) throw Errors.badRequest('scopes 必须为数组');
+  const bad = scopes.filter((s) => !KEY_SCOPES.includes(s));
+  if (bad.length) {
+    throw Errors.badRequest(`非法 scope：${bad.join(',')}（可用：${KEY_SCOPES.join(',')}）`,
+      { code: 'INVALID_SCOPE' });
+  }
+  return [...new Set(scopes)];
+}
+
 /**
  * 校验 key，返回 { key, tenant, actor }。
  * 任何失败都抛 Errors.unauthorized()（不泄露是哪一步失败）。

@@ -5,6 +5,7 @@
 import { newId, nowMs, assertId } from '../../kernel/ids.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { db } from '../../db/index.mjs';
+import { mintKey, assertValidScopes } from './keys.mjs';
 
 export function slugify(name) {
   return String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 't';
@@ -177,6 +178,7 @@ export async function findActorByExternal(tenantId, externalId) {
 }
 
 export async function createApiKeyRow({ tenantId, projectId = null, actorId, name, prefix, keyHash, scopes = [], expiresAt = null }, h = db()) {
+  assertValidScopes(scopes);
   assertId('ten', tenantId); assertId('usr', actorId);
   const tenant = await readTenantForWrite(h, tenantId);
   await checkQuota(h, tenant, 'max_api_keys');
@@ -218,6 +220,60 @@ export async function revokeApiKey(tenantId, keyId) {
   const r = await db().run(
     "UPDATE api_keys SET status='revoked' WHERE id=? AND tenant_id=? AND status='active'", [keyId, tenantId]);
   if (!r.changes) throw Errors.notFound('API Key 不存在或已吊销');
+}
+
+/**
+ * V2.5：API Key 轮换（带宽限期）。
+ * - 旧 key 必须 active；签发新 key（继承租户/项目/actor/scopes），secret 仅返回一次；
+ * - 旧 key 的 expires_at 收紧为 min(原值, now+graceHours)，宽限期内双 key 可用，
+ *   到期自动失效（verifyApiKey 检查 expires_at），无需定时任务；
+ * - 旧 key 记录 rotated_to（新 key id）与 rotated_at，形成轮换链；
+ * - graceHours 范围 1~720（30 天），默认 24。
+ * 返回 { oldKey, newKey: {..., secret} }。
+ */
+export async function rotateApiKey(tenantId, keyId, { graceHours = 24 } = {}) {
+  assertId('ten', tenantId); assertId('key', keyId);
+  graceHours = Number(graceHours);
+  if (!Number.isFinite(graceHours) || graceHours < 1 || graceHours > 720) {
+    throw Errors.badRequest('graceHours 必须在 1~720 之间');
+  }
+  const now = nowMs();
+  const graceUntil = now + Math.round(graceHours * 3600_000);
+  return db().transaction(async (h) => {
+    const rows = await h.query(
+      "SELECT * FROM api_keys WHERE id=? AND tenant_id=? AND status='active'", [keyId, tenantId]);
+    const old = rows[0];
+    if (!old) throw Errors.notFound('API Key 不存在或已吊销');
+    const { secret, prefix, keyHash } = mintKey();
+    const newId_ = newId('key');
+    const newExpiresAt = old.expires_at && old.expires_at < graceUntil ? old.expires_at : graceUntil;
+    const newRow = {
+      id: newId_, tenant_id: tenantId, project_id: old.project_id, actor_id: old.actor_id,
+      name: `${old.name}（轮换 ${new Date(now).toISOString().slice(0, 10)}）`,
+      prefix, key_hash: keyHash, scopes: old.scopes, status: 'active',
+      expires_at: newExpiresAt, last_used_at: null, created_at: now,
+      rotated_to: null, rotated_at: null,
+    };
+    await h.query(
+      `INSERT INTO api_keys(id,tenant_id,project_id,actor_id,name,prefix,key_hash,scopes,status,expires_at,last_used_at,created_at,rotated_to,rotated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [newRow.id, newRow.tenant_id, newRow.project_id, newRow.actor_id, newRow.name,
+       newRow.prefix, newRow.key_hash, newRow.scopes, newRow.status, newRow.expires_at,
+       newRow.last_used_at, newRow.created_at, null, null]);
+    // 旧 key：宽限期后失效（取更早的那个时间），记录轮换链
+    const oldExpiresAt = old.expires_at && old.expires_at < graceUntil ? old.expires_at : graceUntil;
+    await h.query(
+      'UPDATE api_keys SET expires_at=?, rotated_to=?, rotated_at=? WHERE id=? AND tenant_id=?',
+      [oldExpiresAt, newId_, now, keyId, tenantId]);
+    const scopes = JSON.parse(old.scopes || '[]');
+    const { key_hash: _h1, ...safeNew } = newRow;
+    const { key_hash: _h2, ...safeOld } = { ...old, expires_at: oldExpiresAt, rotated_to: newId_, rotated_at: now };
+    return {
+      oldKey: { ...safeOld, scopes },
+      newKey: { ...safeNew, scopes, secret }, // secret 只在这里出现一次
+      graceUntil: oldExpiresAt,
+    };
+  });
 }
 
 export const touchKeyLastUsed = (tenantId, keyId) =>

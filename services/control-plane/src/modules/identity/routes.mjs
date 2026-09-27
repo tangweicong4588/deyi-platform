@@ -14,14 +14,14 @@ import {
   createTenant, listTenants, getTenant, setTenantStatus, updateTenant, getTenantQuotas,
   createProject, listProjects,
   createActor, getActor,
-  createApiKeyRow, listApiKeys, revokeApiKey,
+  createApiKeyRow, listApiKeys, revokeApiKey, rotateApiKey,
   bindRole, getRoleBindings,
 } from './store.mjs';
 import { provisionTenant } from './provision.mjs';
 import { mintKey } from './keys.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
 import {
-  authenticate, requireOperator, requireTenantRole, tenantScope,
+  authenticate, requireOperator, requireTenantRole, requireScope, tenantScope,
 } from './middleware.mjs';
 
 const ok = (res, data, status = 200) => sendJson(res, status, { data });
@@ -92,7 +92,7 @@ export function registerIdentityRoutes(app) {
 
   // ---------- 租户 admin：API Key（secret 仅返回一次） ----------
   app.post('/v1/admin/tenants/:tenantId/api-keys',
-    authenticate, tenantScope, requireTenantRole('admin'), async (req, res) => {
+    authenticate, tenantScope, requireTenantRole('admin'), requireScope('identity.keys'), async (req, res) => {
       const { actorId, name, projectId = null, scopes = [], expiresAt = null } = req.body || {};
       if (!actorId || !name) throw Errors.badRequest('actorId / name 必填');
       assertId('usr', actorId);
@@ -100,17 +100,39 @@ export function registerIdentityRoutes(app) {
       const row = await createApiKeyRow({
         tenantId: req.params.tenantId, projectId, actorId, name, prefix, keyHash, scopes, expiresAt,
       });
+      await tryAudit({
+        tenantId: req.params.tenantId, actorId: ctx().actorId, traceId: ctx().traceId,
+        action: 'identity.apikey.created', resourceKind: 'api_key', resourceId: row.id,
+        payload: { name, scopes: row.scopes, projectId, expiresAt },
+      });
       // L-1 安全 review：响应里剔除 key_hash（持有者不需要它，避免进日志/审计）
       const { key_hash: _dropped, ...safeRow } = row;
       ok(res, { ...safeRow, key: secret }, 201); // key 只出现在这一次响应里
+    });
+  // V2.5：轮换（宽限期内双 key 可用，secret 仅返回一次）
+  app.post('/v1/admin/tenants/:tenantId/api-keys/:keyId/rotate',
+    authenticate, tenantScope, requireTenantRole('admin'), requireScope('identity.keys'), async (req, res) => {
+      assertId('key', req.params.keyId);
+      const { graceHours = 24 } = req.body || {};
+      const r = await rotateApiKey(req.params.tenantId, req.params.keyId, { graceHours });
+      await tryAudit({
+        tenantId: req.params.tenantId, actorId: ctx().actorId, traceId: ctx().traceId,
+        action: 'identity.apikey.rotated', resourceKind: 'api_key', resourceId: r.oldKey.id,
+        payload: { newKeyId: r.newKey.id, graceUntil: r.graceUntil },
+      });
+      ok(res, r, 201);
     });
   app.get('/v1/admin/tenants/:tenantId/api-keys',
     authenticate, tenantScope, requireTenantRole('admin'), async (req, res) => {
       ok(res, await listApiKeys(req.params.tenantId)); // 列表不含 hash/secret
     });
   app.delete('/v1/admin/tenants/:tenantId/api-keys/:keyId',
-    authenticate, tenantScope, requireTenantRole('admin'), async (req, res) => {
+    authenticate, tenantScope, requireTenantRole('admin'), requireScope('identity.keys'), async (req, res) => {
       await revokeApiKey(req.params.tenantId, req.params.keyId);
+      await tryAudit({
+        tenantId: req.params.tenantId, actorId: ctx().actorId, traceId: ctx().traceId,
+        action: 'identity.apikey.revoked', resourceKind: 'api_key', resourceId: req.params.keyId,
+      });
       ok(res, { revoked: true });
     });
 

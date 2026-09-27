@@ -13,7 +13,7 @@
 import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx, runWithContext } from '../../kernel/context.mjs';
-import { authenticate, effectiveRank } from '../identity/middleware.mjs';
+import { authenticate, effectiveRank, requireScope } from '../identity/middleware.mjs';
 import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import { db } from '../../db/index.mjs';
@@ -85,7 +85,7 @@ function withTenant(tenantId, fn) {
 
 export function registerKnowledgeRoutes(app) {
   // ---- ingest ----
-  app.post('/v1/projects/:projectId/knowledge/documents', authenticate, async (req, res) => {
+  app.post('/v1/projects/:projectId/knowledge/documents', authenticate, requireScope('knowledge.write'), async (req, res) => {
     const { project, tenantId, actor, c } = await scopedProject(req, 1, 'ingest');
     const { title, content, mime = 'text/markdown', dataClass = 'internal' } = req.body || {};
     if (dataClass && !DATA_CLASSES.has(dataClass)) throw Errors.badRequest('dataClass 非法');
@@ -101,7 +101,7 @@ export function registerKnowledgeRoutes(app) {
   });
 
   // ---- list ----
-  app.get('/v1/projects/:projectId/knowledge/documents', authenticate, async (req, res) => {
+  app.get('/v1/projects/:projectId/knowledge/documents', authenticate, requireScope('knowledge.read'), async (req, res) => {
     const { project, tenantId, actor, c } = await scopedProject(req, 0, 'list');
     await policyCheck({
       actor, tenantId, project, c, action: 'knowledge.read',
@@ -111,7 +111,7 @@ export function registerKnowledgeRoutes(app) {
   });
 
   // ---- reparse（新版本） ----
-  app.post('/v1/projects/:projectId/knowledge/documents/:docId/reparse', authenticate, async (req, res) => {
+  app.post('/v1/projects/:projectId/knowledge/documents/:docId/reparse', authenticate, requireScope('knowledge.write'), async (req, res) => {
     const { project, tenantId, actor, c } = await scopedProject(req, 1, 'reparse');
     await policyCheck({
       actor, tenantId, project, c, action: 'knowledge.ingest',
@@ -125,7 +125,7 @@ export function registerKnowledgeRoutes(app) {
   });
 
   // ---- share（显式跨项目授权） ----
-  app.post('/v1/projects/:projectId/knowledge/documents/:docId/share', authenticate, async (req, res) => {
+  app.post('/v1/projects/:projectId/knowledge/documents/:docId/share', authenticate, requireScope('knowledge.write'), async (req, res) => {
     const { project, tenantId, actor, c } = await scopedProject(req, 1, 'share');
     await policyCheck({
       actor, tenantId, project, c, action: 'knowledge.ingest',
@@ -141,7 +141,7 @@ export function registerKnowledgeRoutes(app) {
   });
 
   // ---- search（ACL 预过滤） ----
-  app.post('/v1/projects/:projectId/knowledge/search', authenticate, async (req, res) => {
+  app.post('/v1/projects/:projectId/knowledge/search', authenticate, requireScope('knowledge.read'), async (req, res) => {
     const { project, tenantId, actor, c } = await scopedProject(req, 0, 'search');
     await policyCheck({
       actor, tenantId, project, c, action: 'knowledge.read',

@@ -10,7 +10,7 @@ import { sendJson } from '../../kernel/http.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { ctx, requireTenant } from '../../kernel/context.mjs';
 import { nowMs, newId } from '../../kernel/ids.mjs';
-import { authenticate, tenantScope, requireTenantRole, requireOperator } from '../identity/middleware.mjs';
+import { authenticate, tenantScope, requireTenantRole, requireOperator, requireScope } from '../identity/middleware.mjs';
 import { getProject } from '../identity/store.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import * as gstore from './store.mjs';
@@ -424,8 +424,8 @@ export async function chatInternal({ model: modelName = 'deyi-default', messages
   return { text: json.choices?.[0]?.message?.content || '', usage, model: g.model };
 }
 
-export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions', authenticate, handleChat);
-  app.post('/v1/gw/embeddings', authenticate, handleEmbeddings);
+export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions', authenticate, requireScope('gateway.chat'), handleChat);
+  app.post('/v1/gw/embeddings', authenticate, requireScope('gateway.embeddings'), handleEmbeddings);
 
   // 模型目录（租户可见）
   app.get('/v1/models', authenticate, async (req, res) => {
