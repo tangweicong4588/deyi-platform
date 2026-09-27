@@ -6,6 +6,7 @@ import { tasksApi } from '../api/console';
 import type { BizTask } from '../api/console';
 import { ApiError } from '../api/client';
 import { Card } from '../components/ui/Card';
+import { NoProjectHint } from '../components/NoProjectHint';
 import { TextField } from '../components/ui/TextField';
 import { Button } from '../components/ui/Button';
 import { Alert } from '../components/ui/Alert';
@@ -14,7 +15,7 @@ import { Spinner } from '../components/ui/Spinner';
 const KIND_LABEL: Record<string, string> = { ticket: '工单', approval: '审批单', doc_task: '文档任务' };
 
 export function TasksPage() {
-  const { token, projectId } = useAuth();
+  const { token, projectId, projectsLoaded } = useAuth();
   const navigate = useNavigate();
   const [items, setItems] = useState<BizTask[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,6 +40,11 @@ export function TasksPage() {
   }, [token, projectId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // 项目列表已加载但无可用项目：给明确引导，而不是无限转圈
+  if (projectsLoaded && !projectId) {
+    return <NoProjectHint pageName="业务任务" />;
+  }
 
   const onCreate = async (e: FormEvent) => {
     e.preventDefault();

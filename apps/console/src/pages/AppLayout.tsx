@@ -37,6 +37,7 @@ export function AppLayout() {
           <label className="layout__proj">
             <span>项目</span>
             <select value={projectId ?? ''} onChange={(e) => selectProject(e.target.value)}>
+              {projects.length === 0 && <option value="" disabled>暂无项目</option>}
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}

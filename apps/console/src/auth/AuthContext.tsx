@@ -11,6 +11,8 @@ interface AuthState {
   me: Me | null;
   projects: Project[];
   projectId: string | null;
+  /** 项目列表是否已加载完成（用于区分"加载中"与"租户确实没有项目"） */
+  projectsLoaded: boolean;
   login: (tenant: string, username: string, password: string, totpCode?: string) => Promise<void>;
   logout: () => void;
   selectProject: (id: string) => void;
@@ -27,6 +29,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
   const [me, setMe] = useState<Me | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem(PROJECT_KEY));
 
   const loadSession = useCallback(async (t: string) => {
@@ -44,6 +47,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     } catch {
       setProjects([]);
+    } finally {
+      setProjectsLoaded(true);
     }
   }, []);
 
@@ -66,6 +71,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(null);
     setMe(null);
     setProjects([]);
+    setProjectsLoaded(false);
+    setProjectId(null);
   }, []);
 
   const selectProject = useCallback((id: string) => {
@@ -74,8 +81,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ token, me, projects, projectId, login, logout, selectProject }),
-    [token, me, projects, projectId, login, logout, selectProject],
+    () => ({ token, me, projects, projectId, projectsLoaded, login, logout, selectProject }),
+    [token, me, projects, projectId, projectsLoaded, login, logout, selectProject],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

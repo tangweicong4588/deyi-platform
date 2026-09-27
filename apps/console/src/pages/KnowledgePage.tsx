@@ -5,13 +5,14 @@ import { knowledgeApi } from '../api/console';
 import type { KnowledgeDoc } from '../api/console';
 import { ApiError } from '../api/client';
 import { Card } from '../components/ui/Card';
+import { NoProjectHint } from '../components/NoProjectHint';
 import { TextField } from '../components/ui/TextField';
 import { Button } from '../components/ui/Button';
 import { Alert } from '../components/ui/Alert';
 import { Spinner } from '../components/ui/Spinner';
 
 export function KnowledgePage() {
-  const { token, projectId } = useAuth();
+  const { token, projectId, projectsLoaded } = useAuth();
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +36,11 @@ export function KnowledgePage() {
   }, [token, projectId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // 项目列表已加载但无可用项目：给明确引导，而不是无限转圈
+  if (projectsLoaded && !projectId) {
+    return <NoProjectHint pageName="知识库" />;
+  }
 
   const onIngest = async (e: FormEvent) => {
     e.preventDefault();
