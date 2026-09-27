@@ -11,7 +11,8 @@ import { Errors } from '../../kernel/errors.mjs';
 import { ctx, requireTenant } from '../../kernel/context.mjs';
 import { nowMs, newId } from '../../kernel/ids.mjs';
 import { authenticate, tenantScope, requireTenantRole, requireOperator, requireScope } from '../identity/middleware.mjs';
-import { getProject } from '../identity/store.mjs';
+import { getProject, getTenant, getTenantQuotas } from '../identity/store.mjs';
+import { checkRateLimit } from './ratelimit.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import * as gstore from './store.mjs';
 import { resolveModel, checkDataClass, estimateCost, calcCostCents } from './router.mjs';
@@ -41,6 +42,27 @@ async function budgetState(tenantId, project) {
     if (b.token_limit != null) remaining.tokens = Math.min(remaining.tokens, b.token_limit - b.used_tokens);
   }
   return { tenantBudget, projectBudget, remaining };
+}
+
+/**
+ * V2.6：网关速率限制（token bucket，按租户+key）。
+ * rpm 取租户配额（套餐默认 + 租户 quotas 覆盖）；null = 不限。
+ * 位置：authenticate/requireScope 之后、业务 handler 之前。
+ */
+async function rateLimitGuard(req, res, next) {
+  const c = ctx();
+  const t = c.tenantId ? await getTenant(c.tenantId).catch(() => null) : null;
+  const rpm = t ? getTenantQuotas(t).rpm : null;
+  const r = checkRateLimit(`gw:${c.tenantId}:${c.keyId || c.actorId}`, rpm);
+  if (r.limited) {
+    res.setHeader('x-ratelimit-limit', String(rpm));
+    res.setHeader('x-ratelimit-remaining', String(r.remaining));
+  }
+  if (!r.allowed) {
+    res.setHeader('retry-after', String(Math.max(1, Math.ceil(r.retryAfterMs / 1000))));
+    throw Errors.rateLimited(r.retryAfterMs, { tenant_id: c.tenantId });
+  }
+  await next();
 }
 
 /**
@@ -424,8 +446,8 @@ export async function chatInternal({ model: modelName = 'deyi-default', messages
   return { text: json.choices?.[0]?.message?.content || '', usage, model: g.model };
 }
 
-export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions', authenticate, requireScope('gateway.chat'), handleChat);
-  app.post('/v1/gw/embeddings', authenticate, requireScope('gateway.embeddings'), handleEmbeddings);
+export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions', authenticate, requireScope('gateway.chat'), rateLimitGuard, handleChat);
+  app.post('/v1/gw/embeddings', authenticate, requireScope('gateway.embeddings'), rateLimitGuard, handleEmbeddings);
 
   // 模型目录（租户可见）
   app.get('/v1/models', authenticate, async (req, res) => {
@@ -447,6 +469,19 @@ export function registerGatewayRoutes(app) {  app.post('/v1/gw/chat/completions'
           tenantId: req.params.tenantId, projectId, period, costLimitCents, tokenLimit,
         }),
       });
+    });
+
+  // V2.6：全租户套餐配额 → 当月预算行同步（幂等；手工预算行优先，不覆盖）
+  app.post('/v1/admin/budgets/sync-plan', authenticate, requireOperator,
+    async (req, res) => {
+      const { listTenants } = await import('../identity/store.mjs');
+      const tenants = await listTenants();
+      const out = { total: tenants.length, ok: 0, failed: [] };
+      for (const t of tenants) {
+        try { await gstore.ensurePlanBudget(t.id); out.ok++; }
+        catch (e) { out.failed.push({ tenant_id: t.id, error: String(e?.message || e) }); }
+      }
+      sendJson(res, 200, { data: out });
     });
 
   // 用量账本（租户 admin；不含 prompt 原文）

@@ -20,6 +20,10 @@ export const Errors = {
   gone: (msg) => new PlatformError('GONE', msg, { status: 410 }),
   policyDenied: (reason, details) => new PlatformError('POLICY_DENIED', `策略拒绝：${reason}`, { status: 403, details }),
   budgetExceeded: (details) => new PlatformError('BUDGET_EXCEEDED', '预算已耗尽', { status: 402, details }),
+  rateLimited: (retryAfterMs, details) =>
+    new PlatformError('RATE_LIMITED', '请求过于频繁，请稍后重试', {
+      status: 429, details: { code: 'RATE_LIMITED', retry_after_ms: retryAfterMs, ...(details || {}) },
+    }),
   approvalRequired: (approvalId) =>
     new PlatformError('APPROVAL_REQUIRED', '该操作需要审批', { status: 403, details: { approvalId } }),
   upstream: (msg, details) => new PlatformError('UPSTREAM_ERROR', msg, { status: 502, details }),

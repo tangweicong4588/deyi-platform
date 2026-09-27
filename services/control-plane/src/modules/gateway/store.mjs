@@ -105,7 +105,7 @@ export async function setBudget({ tenantId, projectId = null, period = 'monthly'
   const existing = await getBudget(tenantId, projectId, periodKey, period);
   if (existing) {
     await db().query(
-      `UPDATE budgets SET cost_limit_cents=?, token_limit=?, status='active', updated_at=? WHERE id=?`,
+      `UPDATE budgets SET cost_limit_cents=?, token_limit=?, status='active', source='manual', updated_at=? WHERE id=?`,
       [costLimitCents, tokenLimit, nowMs(), existing.id]);
     return (await getBudget(tenantId, projectId, periodKey, period));
   }
@@ -113,14 +113,57 @@ export async function setBudget({ tenantId, projectId = null, period = 'monthly'
     id: newId('bdg'), tenant_id: tenantId, project_id: projectId, period,
     cost_limit_cents: costLimitCents, token_limit: tokenLimit,
     used_cost_cents: 0, used_tokens: 0, period_key: periodKey,
-    status: 'active', created_at: nowMs(), updated_at: nowMs(),
+    status: 'active', source: 'manual', created_at: nowMs(), updated_at: nowMs(),
   };
   await db().query(
     `INSERT INTO budgets(id,tenant_id,project_id,period,cost_limit_cents,token_limit,
-     used_cost_cents,used_tokens,period_key,status,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+     used_cost_cents,used_tokens,period_key,status,source,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [row.id, row.tenant_id, row.project_id, row.period, row.cost_limit_cents, row.token_limit,
-     row.used_cost_cents, row.used_tokens, row.period_key, row.status, row.created_at, row.updated_at]);
+     row.used_cost_cents, row.used_tokens, row.period_key, row.status, row.source, row.created_at, row.updated_at]);
+  return row;
+}
+
+/**
+ * V2.6：套餐配额 → 预算行落地（幂等）。
+ * - 租户当月没有租户级 monthly 预算行，且套餐 tokens_per_month 非空 → 创建 source='plan' 的行；
+ * - 已有 source='plan' 的行 → 按当前配额同步 token_limit（保留 used 计数）；
+ * - 已有 source='manual' 的行 → 不碰（手工设置优先）；
+ * - 配额为 null（不限）→ 停用 source='plan' 的行（手工行不动）。
+ * 返回最终生效的租户级预算行（或 null）。
+ */
+export async function ensurePlanBudget(tenantId, h = db()) {
+  const { getTenant, getTenantQuotas } = await import('../identity/store.mjs');
+  const t = await getTenant(tenantId, h).catch(() => null);
+  if (!t) throw Errors.badRequest('租户不存在');
+  const quotas = getTenantQuotas(t);
+  const limit = quotas.tokens_per_month == null ? null : Math.max(0, Math.floor(quotas.tokens_per_month));
+  const periodKey = currentPeriodKey();
+  const existing = await getBudget(tenantId, null, periodKey, 'monthly');
+  if (existing && existing.source !== 'plan') return existing; // 手工行优先
+  if (limit == null) {
+    if (existing && existing.status === 'active') {
+      await h.query(`UPDATE budgets SET status='inactive', updated_at=? WHERE id=?`, [nowMs(), existing.id]);
+    }
+    return null;
+  }
+  if (existing) {
+    await h.query(`UPDATE budgets SET token_limit=?, status='active', updated_at=? WHERE id=?`,
+      [limit, nowMs(), existing.id]);
+    return (await getBudget(tenantId, null, periodKey, 'monthly'));
+  }
+  const row = {
+    id: newId('bdg'), tenant_id: tenantId, project_id: null, period: 'monthly',
+    cost_limit_cents: null, token_limit: limit,
+    used_cost_cents: 0, used_tokens: 0, period_key: periodKey,
+    status: 'active', source: 'plan', created_at: nowMs(), updated_at: nowMs(),
+  };
+  await h.query(
+    `INSERT INTO budgets(id,tenant_id,project_id,period,cost_limit_cents,token_limit,
+     used_cost_cents,used_tokens,period_key,status,source,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [row.id, row.tenant_id, row.project_id, row.period, row.cost_limit_cents, row.token_limit,
+     row.used_cost_cents, row.used_tokens, row.period_key, row.status, row.source, row.created_at, row.updated_at]);
   return row;
 }
 

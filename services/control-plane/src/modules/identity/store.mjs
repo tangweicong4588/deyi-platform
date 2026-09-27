@@ -66,6 +66,11 @@ export async function updateTenant(tenantId, patch = {}, h = db()) {
     if (String(e.message).includes('UNIQUE')) throw Errors.conflict('租户 slug 已存在');
     throw e;
   }
+  // V2.6：套餐/配额变更 → 同步当月 plan 预算行（动态 import 避免 identity↔gateway 循环依赖）
+  if (patch.plan !== undefined || patch.quotas !== undefined) {
+    const gw = await import('../gateway/store.mjs');
+    await gw.ensurePlanBudget(tenantId, h);
+  }
   return getTenant(tenantId, h);
 }
 
@@ -81,9 +86,10 @@ export const listTenants = async () =>
 // ---------- V2.1-B：租户套餐与配额（SaaS 运营面） ----------
 // 配额语义：数字=上限；null=不限。quotas 列是租户级 JSON 覆盖，缺失的 key 用计划默认。
 export const TENANT_PLANS = {
-  trial:        { max_projects: 5,  max_actors: 20,  max_api_keys: 20 },
-  professional: { max_projects: 50, max_actors: 200, max_api_keys: 200 },
-  enterprise:   { max_projects: null, max_actors: null, max_api_keys: null },
+  // rpm：网关每 key 每分钟请求上限（null = 不限）；tokens_per_month：当月 token 配额（null = 不限）
+  trial:        { max_projects: 5,  max_actors: 20,  max_api_keys: 20,  rpm: 30,  tokens_per_month: 1_000_000 },
+  professional: { max_projects: 50, max_actors: 200, max_api_keys: 200, rpm: 300, tokens_per_month: 100_000_000 },
+  enterprise:   { max_projects: null, max_actors: null, max_api_keys: null, rpm: null, tokens_per_month: null },
 };
 export const TENANT_STATUSES = new Set(['active', 'suspended']);
 
