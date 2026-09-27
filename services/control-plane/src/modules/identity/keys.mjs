@@ -59,6 +59,7 @@ export const KEY_SCOPES = [
   'artifacts.read', 'artifacts.write',
   'sagas.read', 'sagas.write',
   'trace.read', // V3.4 全链路追溯：只读
+  'dora.read', // V3.6 研发效能度量：只读
   'identity.keys', // key 管理：签发/轮换/吊销
 ];
 

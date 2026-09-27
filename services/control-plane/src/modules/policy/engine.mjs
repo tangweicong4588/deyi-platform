@@ -222,6 +222,14 @@ export function decideBuiltin(input) {
       : deny('追溯读取需要 viewer 角色');
   }
 
+  // R6i: 研发效能度量 —— dora.read 需 viewer+（只读报表）
+  if (action === 'dora.read') {
+    const pj18 = requireProject(); if (pj18) return pj18;
+    return rankOf(actor.roles, project.id) >= 0
+      ? allow('效能报表读取（viewer+）')
+      : deny('效能报表读取需要 viewer 角色');
+  }
+
   // 默认：拒绝未知动作（fail-closed）
   return deny(`未知动作: ${action}`);
 }
