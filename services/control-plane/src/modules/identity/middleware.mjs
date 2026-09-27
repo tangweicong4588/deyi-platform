@@ -9,6 +9,7 @@ import { Errors } from '../../kernel/errors.mjs';
 import { config } from '../../kernel/config.mjs';
 import { timingSafeEqual } from 'node:crypto';
 import { verifyApiKey } from './keys.mjs';
+import { ipAllowed, resolveClientIp } from './ipallow.mjs';
 import {
   getTenant, getActor, findActorByExternal, createActor,
   getRoleBindings, roleRank,
@@ -16,8 +17,19 @@ import {
 import { getIdP } from './idp.mjs';
 import { logger } from '../../kernel/logging.mjs';
 
-async function fromApiKey(secret) {
+async function fromApiKey(secret, req) {
   const { key, tenant, actor } = await verifyApiKey(secret, { getTenant, getActor });
+  // V2.14：key 级 IP 白名单。fail-closed：名单数据损坏 → 拒绝；空名单 = 不限制（历史 key 兼容）。
+  if (key.ip_allowlist_ok === false) {
+    throw Errors.forbidden('该 API Key 的白名单数据异常，已拒绝访问', { code: 'ALLOWLIST_CORRUPT' });
+  }
+  const allowlist = Array.isArray(key.ip_allowlist) ? key.ip_allowlist : [];
+  if (allowlist.length > 0) {
+    const ip = resolveClientIp(req, config.TRUST_PROXY === 'true');
+    if (!ipAllowed(ip, allowlist)) {
+      throw Errors.forbidden('来源 IP 不在该 API Key 的白名单内', { code: 'IP_NOT_ALLOWED' });
+    }
+  }
   const bindings = await getRoleBindings(tenant.id, actor.id);
   return {
     authKind: 'api_key', tenantId: tenant.id, actorId: actor.id, actorKind: actor.kind,
@@ -71,7 +83,7 @@ export async function authenticate(req, res, next) {
   if (isOperator) {
     resolved = { authKind: 'operator', tenantId: null, actorId: 'operator', actorKind: 'service', projectId: null, roles: [] };
   } else if (token.startsWith('dyk_')) {
-    resolved = await fromApiKey(token);
+    resolved = await fromApiKey(token, req);
   } else {
     resolved = await fromJwt(token);
   }

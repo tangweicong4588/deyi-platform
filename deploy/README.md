@@ -107,3 +107,8 @@ Ingress 为模板（`k8s/control-plane/ingress.yaml`），按实际域名修改 
 - **生产启动校验**（`src/kernel/config.mjs`）：缺 `DATABASE_URL`/`AUTH_JWT_SECRET`/
   `LITELLM_URL`/`QDRANT_URL`/`AUDIT_ANCHOR_URL` 或开了 `BOOTSTRAP_ENABLED`
   会直接拒绝启动，这是故意的。
+- **API Key IP 白名单的信任边界**（V2.14）：`TRUST_PROXY` 决定来源 IP 取自
+  `x-forwarded-for`（最左）还是直连 socket。**仅当**平台部署在"可信且会清洗/
+  追加 XFF"的反向代理（Nginx/Ingress）之后，才设 `TRUST_PROXY=true`；直连
+  公网、代理不可信、或不确定时保持 `false`——此时伪造 XFF 头无法绕过白名单。
+  白名单是纵深防御的一层，不能替代网络层 ACL。

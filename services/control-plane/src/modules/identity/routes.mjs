@@ -14,7 +14,7 @@ import {
   createTenant, listTenants, getTenant, setTenantStatus, updateTenant, getTenantQuotas,
   createProject, listProjects,
   createActor, getActor,
-  createApiKeyRow, listApiKeys, revokeApiKey, rotateApiKey,
+  createApiKeyRow, listApiKeys, revokeApiKey, rotateApiKey, updateApiKey, getApiKey,
   bindRole, getRoleBindings,
 } from './store.mjs';
 import { provisionTenant } from './provision.mjs';
@@ -110,21 +110,36 @@ export function registerIdentityRoutes(app) {
   // ---------- 租户 admin：API Key（secret 仅返回一次） ----------
   app.post('/v1/admin/tenants/:tenantId/api-keys',
     authenticate, tenantScope, requireTenantRole('admin'), requireScope('identity.keys'), async (req, res) => {
-      const { actorId, name, projectId = null, scopes = [], expiresAt = null } = req.body || {};
+      const { actorId, name, projectId = null, scopes = [], expiresAt = null, ipAllowlist = [], note = null } = req.body || {};
       if (!actorId || !name) throw Errors.badRequest('actorId / name 必填');
       assertId('usr', actorId);
       const { secret, prefix, keyHash } = mintKey();
       const row = await createApiKeyRow({
         tenantId: req.params.tenantId, projectId, actorId, name, prefix, keyHash, scopes, expiresAt,
+        ipAllowlist, note,
       });
       await tryAudit({
         tenantId: req.params.tenantId, actorId: ctx().actorId, traceId: ctx().traceId,
         action: 'identity.apikey.created', resourceKind: 'api_key', resourceId: row.id,
-        payload: { name, scopes: row.scopes, projectId, expiresAt },
+        payload: { name, scopes: row.scopes, projectId, expiresAt, ipAllowlist: row.ip_allowlist, note: row.note },
       });
       // L-1 安全 review：响应里剔除 key_hash（持有者不需要它，避免进日志/审计）
       const { key_hash: _dropped, ...safeRow } = row;
       ok(res, { ...safeRow, key: secret }, 201); // key 只出现在这一次响应里
+    });
+  // V2.14：更新白名单 / 备注（PATCH 语义）
+  app.patch('/v1/admin/tenants/:tenantId/api-keys/:keyId',
+    authenticate, tenantScope, requireTenantRole('admin'), requireScope('identity.keys'), async (req, res) => {
+      assertId('key', req.params.keyId);
+      const { ipAllowlist, note } = req.body || {};
+      const row = await updateApiKey(req.params.tenantId, req.params.keyId, { ipAllowlist, note });
+      await tryAudit({
+        tenantId: req.params.tenantId, actorId: ctx().actorId, traceId: ctx().traceId,
+        action: 'identity.apikey.updated', resourceKind: 'api_key', resourceId: row.id,
+        payload: { ipAllowlist: row.ip_allowlist, note: row.note },
+      });
+      const { key_hash: _dropped, ...safeRow } = row;
+      ok(res, safeRow);
     });
   // V2.5：轮换（宽限期内双 key 可用，secret 仅返回一次）
   app.post('/v1/admin/tenants/:tenantId/api-keys/:keyId/rotate',

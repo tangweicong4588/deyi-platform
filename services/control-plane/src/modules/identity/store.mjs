@@ -6,6 +6,7 @@ import { newId, nowMs, assertId } from '../../kernel/ids.mjs';
 import { Errors } from '../../kernel/errors.mjs';
 import { db } from '../../db/index.mjs';
 import { mintKey, assertValidScopes } from './keys.mjs';
+import { assertValidAllowlist, assertValidNote, parseAllowlistJson } from './ipallow.mjs';
 
 export function slugify(name) {
   return String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 't';
@@ -194,8 +195,10 @@ export async function findActorByExternal(tenantId, externalId) {
   return rows[0] || null;
 }
 
-export async function createApiKeyRow({ tenantId, projectId = null, actorId, name, prefix, keyHash, scopes = [], expiresAt = null }, h = db()) {
+export async function createApiKeyRow({ tenantId, projectId = null, actorId, name, prefix, keyHash, scopes = [], expiresAt = null, ipAllowlist = [], note = null }, h = db()) {
   assertValidScopes(scopes);
+  const allowlist = assertValidAllowlist(ipAllowlist);
+  const noteText = assertValidNote(note);
   assertId('ten', tenantId); assertId('usr', actorId);
   const tenant = await readTenantForWrite(h, tenantId);
   await checkQuota(h, tenant, 'max_api_keys');
@@ -209,27 +212,72 @@ export async function createApiKeyRow({ tenantId, projectId = null, actorId, nam
     id: newId('key'), tenant_id: tenantId, project_id: projectId, actor_id: actorId,
     name, prefix, key_hash: keyHash, scopes: JSON.stringify(scopes),
     status: 'active', expires_at: expiresAt, last_used_at: null, created_at: nowMs(),
+    ip_allowlist: JSON.stringify(allowlist), note: noteText,
   };
   await h.query(
-    `INSERT INTO api_keys(id,tenant_id,project_id,actor_id,name,prefix,key_hash,scopes,status,expires_at,last_used_at,created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO api_keys(id,tenant_id,project_id,actor_id,name,prefix,key_hash,scopes,status,expires_at,last_used_at,created_at,ip_allowlist,note)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [row.id, row.tenant_id, row.project_id, row.actor_id, row.name, row.prefix, row.key_hash,
-     row.scopes, row.status, row.expires_at, row.last_used_at, row.created_at]);
-  return { ...row, scopes };
+     row.scopes, row.status, row.expires_at, row.last_used_at, row.created_at,
+     row.ip_allowlist, row.note]);
+  return { ...row, scopes, ip_allowlist: allowlist };
 }
 
-/** 按前缀找候选 key（含 hash，比对在 keys.mjs 做） */
+/**
+ * V2.14：更新 key 的 IP 白名单 / 用途备注（PATCH 语义：undefined = 不改；
+ * ipAllowlist 传 [] = 清除限制，回到"不限制"）。
+ */
+export async function updateApiKey(tenantId, keyId, { ipAllowlist = undefined, note = undefined } = {}) {
+  assertId('ten', tenantId); assertId('key', keyId);
+  const sets = [];
+  const vals = [];
+  if (ipAllowlist !== undefined) {
+    const allowlist = assertValidAllowlist(ipAllowlist);
+    sets.push('ip_allowlist=?');
+    vals.push(JSON.stringify(allowlist));
+  }
+  if (note !== undefined) {
+    sets.push('note=?');
+    vals.push(assertValidNote(note));
+  }
+  if (!sets.length) throw Errors.badRequest('没有可更新的字段（ipAllowlist / note）');
+  const r = await db().run(
+    `UPDATE api_keys SET ${sets.join(',')} WHERE id=? AND tenant_id=? AND status='active'`,
+    [...vals, keyId, tenantId]);
+  if (!r.changes) throw Errors.notFound('API Key 不存在或已吊销');
+  return getApiKey(tenantId, keyId);
+}
+
+/** 取单个 key（含白名单/备注，不含 hash） */
+export async function getApiKey(tenantId, keyId) {
+  assertId('ten', tenantId); assertId('key', keyId);
+  const rows = await db().query(
+    `SELECT id,tenant_id,project_id,actor_id,name,prefix,scopes,status,expires_at,last_used_at,created_at,ip_allowlist,note
+     FROM api_keys WHERE id=? AND tenant_id=?`, [keyId, tenantId]);
+  const r = rows[0];
+  if (!r) throw Errors.notFound('API Key 不存在');
+  const { ok, list } = parseAllowlistJson(r.ip_allowlist);
+  return { ...r, scopes: JSON.parse(r.scopes || '[]'), ip_allowlist: ok ? list : r.ip_allowlist };
+}
+
+/** 按前缀找候选 key（含 hash，比对在 keys.mjs 做；ip_allowlist 解析为数组供中间件校验） */
 export async function findApiKeyCandidates(prefix) {
   const rows = await db().query("SELECT * FROM api_keys WHERE prefix=? AND status='active'", [prefix]);
-  return rows.map((r) => ({ ...r, scopes: JSON.parse(r.scopes || '[]') }));
+  return rows.map((r) => {
+    const { ok, list } = parseAllowlistJson(r.ip_allowlist);
+    return { ...r, scopes: JSON.parse(r.scopes || '[]'), ip_allowlist: list, ip_allowlist_ok: ok };
+  });
 }
 
 export async function listApiKeys(tenantId) {
   assertId('ten', tenantId);
   const rows = await db().query(
-    `SELECT id,tenant_id,project_id,actor_id,name,prefix,scopes,status,expires_at,last_used_at,created_at
+    `SELECT id,tenant_id,project_id,actor_id,name,prefix,scopes,status,expires_at,last_used_at,created_at,ip_allowlist,note
      FROM api_keys WHERE tenant_id=? ORDER BY created_at`, [tenantId]);
-  return rows.map((r) => ({ ...r, scopes: JSON.parse(r.scopes || '[]') }));
+  return rows.map((r) => {
+    const { ok, list } = parseAllowlistJson(r.ip_allowlist);
+    return { ...r, scopes: JSON.parse(r.scopes || '[]'), ip_allowlist: ok ? list : r.ip_allowlist };
+  });
 }
 
 export async function revokeApiKey(tenantId, keyId) {
@@ -270,13 +318,15 @@ export async function rotateApiKey(tenantId, keyId, { graceHours = 24 } = {}) {
       prefix, key_hash: keyHash, scopes: old.scopes, status: 'active',
       expires_at: newExpiresAt, last_used_at: null, created_at: now,
       rotated_to: null, rotated_at: null,
+      ip_allowlist: old.ip_allowlist || '[]', // V2.14：轮换继承白名单
+      note: old.note || null,                 // V2.14：轮换继承备注
     };
     await h.query(
-      `INSERT INTO api_keys(id,tenant_id,project_id,actor_id,name,prefix,key_hash,scopes,status,expires_at,last_used_at,created_at,rotated_to,rotated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO api_keys(id,tenant_id,project_id,actor_id,name,prefix,key_hash,scopes,status,expires_at,last_used_at,created_at,rotated_to,rotated_at,ip_allowlist,note)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [newRow.id, newRow.tenant_id, newRow.project_id, newRow.actor_id, newRow.name,
        newRow.prefix, newRow.key_hash, newRow.scopes, newRow.status, newRow.expires_at,
-       newRow.last_used_at, newRow.created_at, null, null]);
+       newRow.last_used_at, newRow.created_at, null, null, newRow.ip_allowlist, newRow.note]);
     // 旧 key：宽限期后失效（取更早的那个时间），记录轮换链
     const oldExpiresAt = old.expires_at && old.expires_at < graceUntil ? old.expires_at : graceUntil;
     await h.query(
@@ -285,9 +335,10 @@ export async function rotateApiKey(tenantId, keyId, { graceHours = 24 } = {}) {
     const scopes = JSON.parse(old.scopes || '[]');
     const { key_hash: _h1, ...safeNew } = newRow;
     const { key_hash: _h2, ...safeOld } = { ...old, expires_at: oldExpiresAt, rotated_to: newId_, rotated_at: now };
+    const allowlistOf = (json) => parseAllowlistJson(json).list;
     return {
-      oldKey: { ...safeOld, scopes },
-      newKey: { ...safeNew, scopes, secret }, // secret 只在这里出现一次
+      oldKey: { ...safeOld, scopes, ip_allowlist: allowlistOf(safeOld.ip_allowlist) },
+      newKey: { ...safeNew, scopes, secret, ip_allowlist: allowlistOf(safeNew.ip_allowlist) }, // secret 只在这里出现一次
       graceUntil: oldExpiresAt,
     };
   });

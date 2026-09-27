@@ -54,6 +54,9 @@ const DEF = {
   OTEL_EXPORTER_OTLP_ENDPOINT: '', // 设了就发 OTLP/HTTP traces，否则 tracing 全 no-op
   NOTIFY_TIMEOUT_MS: '8000', // 通知 webhook 单次投递超时（同步投递，超时即记 failed）
   NOTIFY_ALLOW_PRIVATE_TARGETS: 'false', // webhook 目标允许内网/回环地址（默认拒绝，防 SSRF；测试可开）
+  // V2.14：是否信任反向代理的 x-forwarded-for（key 级 IP 白名单的来源 IP 判定）。
+  // 仅当平台部署在"可信、会清洗 XFF"的反向代理之后才设 true；否则伪造 XFF 可绕过白名单。默认 false。
+  TRUST_PROXY: 'false',
 };
 
 function load() {
