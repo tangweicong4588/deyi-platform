@@ -189,6 +189,8 @@ export const handlers = [
 
   // ---------- F1 业务面 mock（内存数据，演示可写） ----------
   ...f1Handlers(),
+  // ---------- F3 软件生产 mock（内存数据，演示可写） ----------
+  ...f3Handlers(),
 ];
 
 // ---- F1 mock 数据与 handlers：任务 / 知识库 / 记忆 ----
@@ -348,6 +350,132 @@ function f1Handlers() {
       }
       mockMems.splice(idx, 1);
       return HttpResponse.json({ data: { deleted: true } });
+    }),
+  ];
+}
+
+// ---- F3 mock 数据与 handlers：流水线 / 发布 / 制品库 / 效能 ----
+// 注意：module 级内存数据，dev server 热重载时重置；仅供离线演示。
+const mockTemplates: Array<Record<string, unknown>> = [];
+const mockReleases: Array<Record<string, unknown>> = [];
+const mockArtifacts: Array<Record<string, unknown>> = [];
+let mockTplSeq = 1;
+let mockRelSeq = 1;
+let mockArtSeq = 1;
+
+function f3Handlers() {
+  return [
+    // 流水线模板
+    http.get('*/v1/projects/:projectId/delivery/pipeline-templates', () => {
+      return HttpResponse.json({ data: mockTemplates });
+    }),
+    http.post('*/v1/projects/:projectId/delivery/pipeline-templates', async ({ request }) => {
+      const body = (await request.json()) as { name?: string; stages?: unknown[] };
+      if (!body.name?.trim()) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: '名称必填' } }, { status: 400 });
+      }
+      const tpl: Record<string, unknown> = {
+        id: `ptpl_mock${mockTplSeq++}`, name: body.name.trim(), description: '',
+        visibility: 'private', project_id: 'proj_mock', current_version: 1,
+        archived_at: null, created_at: now(),
+      };
+      mockTemplates.unshift(tpl);
+      return HttpResponse.json({ data: tpl }, { status: 201 });
+    }),
+    http.post('*/v1/projects/:projectId/delivery/pipeline-templates/:templateId/instantiate', async ({ request }) => {
+      const body = (await request.json()) as { change_package_id?: string };
+      if (!body.change_package_id) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: 'change_package_id 必填' } }, { status: 400 });
+      }
+      return HttpResponse.json({ data: { instance: { id: `pinst_mock${Date.now()}`, status: 'running', created_at: now() }, created: true } });
+    }),
+    http.get('*/v1/projects/:projectId/delivery/pipeline-runs', () => {
+      return HttpResponse.json({ data: [] });
+    }),
+    http.get('*/v1/projects/:projectId/delivery/change-packages', () => {
+      return HttpResponse.json({ data: [{ id: 'cp_mock1', title: '演示变更包', status: 'draft' }] });
+    }),
+    // 环境与发布
+    http.get('*/v1/projects/:projectId/deploy-environments', () => {
+      return HttpResponse.json({ data: [
+        { id: 'env_stg', key: 'staging', name: '预发', requires_approval: 0 },
+        { id: 'env_prod', key: 'prod', name: '生产', requires_approval: 1 },
+      ] });
+    }),
+    http.post('*/v1/projects/:projectId/deploy-environments/ensure-defaults', () => {
+      return HttpResponse.json({ data: [
+        { id: 'env_stg', key: 'staging', name: '预发', requires_approval: 0 },
+        { id: 'env_prod', key: 'prod', name: '生产', requires_approval: 1 },
+      ] });
+    }),
+    http.get('*/v1/projects/:projectId/releases', () => {
+      return HttpResponse.json({ data: mockReleases });
+    }),
+    http.post('*/v1/projects/:projectId/releases', async ({ request }) => {
+      const body = (await request.json()) as { environment_key?: string; version?: string; strategy?: string };
+      if (!body.version?.trim()) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: '版本必填' } }, { status: 400 });
+      }
+      const rel: Record<string, unknown> = {
+        id: `rel_mock${mockRelSeq++}`, environment_id: 'env_stg', version: body.version.trim(),
+        strategy: body.strategy ?? 'canary', status: 'draft',
+        requires_approval: body.environment_key === 'prod', approval: null,
+        created_at: now(), updated_at: now(),
+      };
+      mockReleases.unshift(rel);
+      return HttpResponse.json({ data: rel }, { status: 201 });
+    }),
+    http.get('*/v1/projects/:projectId/releases/:releaseId', ({ params }) => {
+      const rel = mockReleases.find((r) => r.id === params.releaseId);
+      if (!rel) {
+        return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '发布单不存在' } }, { status: 404 });
+      }
+      return HttpResponse.json({ data: { release: rel, steps: [] } });
+    }),
+    ...['request-approval', 'approve', 'reject', 'start', 'rollback'].map((action) =>
+      http.post(`*/v1/projects/:projectId/releases/:releaseId/${action}`, ({ params }) => {
+        const rel = mockReleases.find((r) => r.id === params.releaseId);
+        if (!rel) {
+          return HttpResponse.json({ error: { code: 'NOT_FOUND', message: '发布单不存在' } }, { status: 404 });
+        }
+        const next: Record<string, string> = {
+          'request-approval': 'pending_approval', approve: 'approved', reject: 'rejected',
+          start: 'succeeded', rollback: 'rolled_back',
+        };
+        rel.status = next[action];
+        return HttpResponse.json({ data: rel });
+      }),
+    ),
+    // 制品库
+    http.get('*/v1/projects/:projectId/artifact-packages', () => {
+      return HttpResponse.json({ data: mockArtifacts });
+    }),
+    http.post('*/v1/projects/:projectId/artifact-packages', async ({ request }) => {
+      const body = (await request.json()) as { name?: string; kind?: string };
+      if (!body.name?.trim()) {
+        return HttpResponse.json({ error: { code: 'BAD_REQUEST', message: '包名必填' } }, { status: 400 });
+      }
+      const pkg: Record<string, unknown> = {
+        id: `apkg_mock${mockArtSeq++}`, name: body.name.trim(), kind: body.kind ?? 'generic', created_at: now(),
+      };
+      (pkg as Record<string, unknown>).versions = [];
+      mockArtifacts.unshift(pkg);
+      return HttpResponse.json({ data: { ...pkg, versions: undefined } }, { status: 201 });
+    }),
+    http.get('*/v1/projects/:projectId/artifact-packages/:packageId/versions', ({ params }) => {
+      const pkg = mockArtifacts.find((a) => a.id === params.packageId);
+      return HttpResponse.json({ data: pkg ? (pkg.versions as unknown[]) : [] });
+    }),
+    // 效能看板
+    http.get('*/v1/projects/:projectId/dora', () => {
+      return HttpResponse.json({ data: {
+        methodology: 'dora-v1',
+        window: { from: now() - 30 * 86400_000, to: now() },
+        deployment_frequency: { per_day: 1.2, count: 36, window_days: 30 },
+        lead_time: { median_hours: 19.5, p90_hours: 29, count: 30, excluded_no_change_package: 0 },
+        change_failure_rate: { rate: 0.11, failed: 4, total: 36 },
+        time_to_restore: { median_hours: 4, count: 3, unrecovered: 1 },
+      } });
     }),
   ];
 }

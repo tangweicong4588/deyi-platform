@@ -62,7 +62,8 @@ export async function writeBlob(buffer) {
     return { hash, size: buffer.length, storagePath: rel }; // 已存在：去重复用
   } catch { /* 不存在，继续写 */ }
   await fsp.mkdir(dirname(abs), { recursive: true });
-  const tmp = join(tmpdir(), `deyi-artifact-${hash}.tmp`);
+  // 临时文件与目标同目录：同设备 rename 保证原子发布，避免 /tmp 跨设备 EXDEV
+  const tmp = join(dirname(abs), `deyi-artifact-${hash}.${process.pid}.tmp`);
   await new Promise((res, rej) => {
     const ws = createWriteStream(tmp);
     ws.on('error', rej);

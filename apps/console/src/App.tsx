@@ -11,6 +11,10 @@ import { UsagePage } from './pages/UsagePage';
 import { ApiKeysPage } from './pages/settings/ApiKeysPage';
 import { BillingPage } from './pages/settings/BillingPage';
 import { QuotasPage } from './pages/settings/QuotasPage';
+import { PipelinesPage } from './pages/deliver/PipelinesPage';
+import { ReleasesPage } from './pages/deliver/ReleasesPage';
+import { ArtifactsPage } from './pages/deliver/ArtifactsPage';
+import { DoraPage } from './pages/deliver/DoraPage';
 
 export function App() {
   return (
@@ -34,6 +38,10 @@ export function App() {
           <Route path="settings/keys" element={<ApiKeysPage />} />
           <Route path="settings/billing" element={<BillingPage />} />
           <Route path="settings/quotas" element={<QuotasPage />} />
+          <Route path="deliver/pipelines" element={<PipelinesPage />} />
+          <Route path="deliver/releases" element={<ReleasesPage />} />
+          <Route path="deliver/artifacts" element={<ArtifactsPage />} />
+          <Route path="deliver/dora" element={<DoraPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -10,6 +10,13 @@ const NAV = [
   { to: '/usage', label: '用量' },
 ];
 
+const DELIVER_NAV = [
+  { to: '/deliver/pipelines', label: '交付流水线' },
+  { to: '/deliver/releases', label: '发布管理' },
+  { to: '/deliver/artifacts', label: '制品库' },
+  { to: '/deliver/dora', label: '效能看板' },
+];
+
 const ADMIN_NAV = [
   { to: '/settings/keys', label: 'API 密钥' },
   { to: '/settings/billing', label: '账单' },
@@ -32,6 +39,12 @@ export function AppLayout() {
         <div className="layout__brand">得逸智行</div>
         <nav className="layout__nav">
           {NAV.map((n) => (
+            <NavLink key={n.to} to={n.to} className={({ isActive }) => `layout__link${isActive ? ' is-active' : ''}`}>
+              {n.label}
+            </NavLink>
+          ))}
+          <div className="layout__section">软件生产</div>
+          {DELIVER_NAV.map((n) => (
             <NavLink key={n.to} to={n.to} className={({ isActive }) => `layout__link${isActive ? ' is-active' : ''}`}>
               {n.label}
             </NavLink>

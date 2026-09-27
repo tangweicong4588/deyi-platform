@@ -24,17 +24,19 @@ interface Options {
   body?: unknown;
   token?: string | null;
   headers?: Record<string, string>;
+  /** 二进制直传：body 不做 JSON 序列化，content-type 由调用方 headers 指定 */
+  rawBody?: boolean;
 }
 
 export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  if (opts.body !== undefined && !opts.rawBody) headers['content-type'] = 'application/json';
   if (opts.token) headers['authorization'] = `Bearer ${opts.token}`;
 
   const res = await fetch(BASE + path, {
     method: opts.method ?? 'GET',
     headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    body: opts.body === undefined ? undefined : (opts.rawBody ? (opts.body as BodyInit) : JSON.stringify(opts.body)),
   });
 
   let json: any = null;
