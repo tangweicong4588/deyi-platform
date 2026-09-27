@@ -21,6 +21,7 @@ import { provisionTenant } from './provision.mjs';
 import { dryRunOffboard, confirmOffboard } from './offboard.mjs';
 import { mintKey } from './keys.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
+import { alertTenantSuspended } from '../notify/alerts.mjs';
 import {
   authenticate, requireOperator, requireTenantRole, requireScope, tenantScope,
 } from './middleware.mjs';
@@ -65,6 +66,8 @@ export function registerIdentityRoutes(app) {
       tenantId: tenant.id, actorId: ctx().actorId,
       action: 'tenant.suspend', resourceKind: 'tenant', resourceId: tenant.id, payload: {},
     });
+    // V2.13：停用告警（best-effort，await 等待但不抛错）
+    await alertTenantSuspended({ tenantId: tenant.id, tenantName: tenant.name });
     ok(res, tenant);
   });
   app.post('/v1/admin/tenants/:tenantId/resume', authenticate, requireOperator, async (req, res) => {

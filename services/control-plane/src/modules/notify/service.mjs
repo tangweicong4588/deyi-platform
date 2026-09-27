@@ -27,6 +27,8 @@ export const CHANNEL_KINDS = new Set(['webhook']); // email/sms/im 为注册位�
 export const CHANNEL_STATUSES = new Set(['active', 'disabled']);
 export const INTENTS = new Set([
   'reconciliation.escalated', 'notify.test',
+  // V2.13：平台事件告警（见 notify/alerts.mjs）
+  'budget.exhausted', 'ratelimit.hit', 'invoice.finalized', 'tenant.suspended',
 ]);
 
 const SECRET_KEY_RE = /secret|passwd|password|token|api[_-]?key|private[_-]?key|sk[_-]?live/i;

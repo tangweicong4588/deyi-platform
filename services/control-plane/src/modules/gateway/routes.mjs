@@ -19,6 +19,7 @@ import { resolveModel, checkDataClass, estimateCost, calcCostCents } from './rou
 import { upstreamFetch, engineKind, isRetryableStatus } from './engines.mjs';
 import { withSpan } from '../../kernel/tracing.mjs';
 import { logger } from '../../kernel/logging.mjs';
+import { alertBudgetExhausted, alertRateLimitHit } from '../notify/alerts.mjs';
 
 /** 项目解析：Key 绑定的项目优先（更窄），否则看 x-deyi-project 头（必须属于本租户） */
 async function resolveProject(reqLike) {
@@ -60,6 +61,11 @@ async function rateLimitGuard(req, res, next) {
   }
   if (!r.allowed) {
     res.setHeader('retry-after', String(Math.max(1, Math.ceil(r.retryAfterMs / 1000))));
+    // V2.13：限流命中告警（best-effort，不等待；60s/租户采样防轰炸）
+    void alertRateLimitHit({
+      tenantId: c.tenantId, keyId: c.keyId || null, rpm,
+      retryAfterMs: r.retryAfterMs,
+    });
     throw Errors.rateLimited(r.retryAfterMs, { tenant_id: c.tenantId });
   }
   await next();
@@ -218,11 +224,24 @@ async function guardAndRoute(reqLike, endpoint, projectOverride = undefined) {
     },
   }));
   if (!receipt.allow) {
-    if (/预算/.test(receipt.reason)) throw Errors.budgetExceeded({ reason: receipt.reason });
+    if (/预算/.test(receipt.reason)) {
+      // V2.13：预算耗尽告警（best-effort，不等待，不阻塞 402 响应；采样防轰炸）
+      void alertBudgetExhausted({
+        tenantId: c.tenantId, reason: receipt.reason,
+        remainingCostCents: Number.isFinite(budgets.remaining.cost) ? budgets.remaining.cost : null,
+        remainingTokens: Number.isFinite(budgets.remaining.tokens) ? budgets.remaining.tokens : null,
+      });
+      throw Errors.budgetExceeded({ reason: receipt.reason });
+    }
     throw Errors.policyDenied(receipt.reason, { receipt });
   }
   // token 预算在网关层单独卡（单位与费用不同，不能混进上面的 cents 比较）
   if (est.estimatedTokens > budgets.remaining.tokens) {
+    void alertBudgetExhausted({
+      tenantId: c.tenantId, reason: 'token 预算不足',
+      remainingCostCents: Number.isFinite(budgets.remaining.cost) ? budgets.remaining.cost : null,
+      remainingTokens: Number.isFinite(budgets.remaining.tokens) ? budgets.remaining.tokens : null,
+    });
     throw Errors.budgetExceeded({ reason: 'token 预算不足' });
   }
   return { c, model, project, est, body, dataClass };

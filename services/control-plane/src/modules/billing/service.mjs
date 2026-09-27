@@ -18,6 +18,7 @@ import { Errors } from '../../kernel/errors.mjs';
 import { logger } from '../../kernel/logging.mjs';
 import { ctx } from '../../kernel/context.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
+import { alertInvoiceFinalized } from '../notify/alerts.mjs';
 
 export const BILLING_STATUSES = ['draft', 'finalized', 'paid', 'void'];
 
@@ -162,9 +163,11 @@ async function transition(tenantId, invoiceId, from, to, tsCol, auditAction) {
   return pub(updated);
 }
 
-/** 定稿：draft→finalized，冻结快照 */
+/** 定稿：draft→finalized，冻结快照；V2.13：定稿后 best-effort 发 invoice.finalized 告警 */
 export async function finalizeInvoice(tenantId, invoiceId) {
-  return transition(tenantId, invoiceId, ['draft'], 'finalized', 'finalized_at', 'billing.invoice.finalized');
+  const inv = await transition(tenantId, invoiceId, ['draft'], 'finalized', 'finalized_at', 'billing.invoice.finalized');
+  await alertInvoiceFinalized({ tenantId, invoice: inv });
+  return inv;
 }
 
 /** 标记已付：finalized→paid（仅状态标记，不对接真实支付） */
