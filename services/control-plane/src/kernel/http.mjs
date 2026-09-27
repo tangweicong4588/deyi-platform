@@ -24,9 +24,12 @@ export function createApp() {
     use(fn) { middlewares.push(fn); return app; },
     route(method, path, ...handlers) {
       const { re, names } = compilePath(path);
-      routes.push({ method: method.toUpperCase(), re, names, handlers });
+      // V2.9：保留原始 path，供 OpenAPI 规范生成（/v1/openapi.json）
+      routes.push({ method: method.toUpperCase(), path, re, names, handlers });
       return app;
     },
+    /** V2.9：返回已注册路由表的浅拷贝（文档生成用） */
+    routes() { return routes.slice(); },
     get(p, ...h) { return app.route('GET', p, ...h); },
     post(p, ...h) { return app.route('POST', p, ...h); },
     put(p, ...h) { return app.route('PUT', p, ...h); },

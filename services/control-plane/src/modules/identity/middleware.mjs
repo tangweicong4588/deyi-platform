@@ -78,12 +78,15 @@ export async function authenticate(req, res, next) {
   const traceId = ctx().traceId;
   await runWithContext({ traceId, ...resolved }, () => next());
 }
+// V2.9：鉴权标记，供 OpenAPI 规范生成读取（不影响运行时语义）
+authenticate.authInfo = { kind: 'authenticated' };
 
 /** 平台运维（OPERATOR_TOKEN） */
 export async function requireOperator(req, res, next) {
   if (ctx().authKind !== 'operator') throw Errors.forbidden('需要平台运维权限');
   await next();
 }
+requireOperator.authInfo = { kind: 'operator' };
 
 /** 计算在某项目下的有效角色等级（取租户级与项目级的最大值） */
 export function effectiveRank(bindings, projectId = null) {
@@ -99,13 +102,15 @@ export function effectiveRank(bindings, projectId = null) {
 /** 要求租户级最低角色（admin 路由用） */
 export function requireTenantRole(minRole) {
   const min = roleRank(minRole);
-  return async (req, res, next) => {
+  const fn = async (req, res, next) => {
     const c = ctx();
     if (c.authKind === 'operator') return next();
     if (!c.tenantId) throw Errors.unauthorized();
     if (effectiveRank(c.roles, null) < min) throw Errors.forbidden(`需要租户级 ${minRole} 角色`);
     await next();
   };
+  fn.authInfo = { kind: 'tenantRole', role: minRole }; // V2.9：OpenAPI 标记
+  return fn;
 }
 
 /**
@@ -115,7 +120,7 @@ export function requireTenantRole(minRole) {
  * - 一旦设置 scopes，key 必须拥有任一所列 scope 才能进入该路由。
  */
 export function requireScope(...scopes) {
-  return async (req, res, next) => {
+  const fn = async (req, res, next) => {
     const c = ctx();
     if (c.authKind !== 'api_key') return next();
     const ks = c.keyScopes || [];
@@ -126,6 +131,8 @@ export function requireScope(...scopes) {
     }
     await next();
   };
+  fn.authInfo = { kind: 'scopes', scopes: [...scopes] }; // V2.9：OpenAPI 标记
+  return fn;
 }
 
 /**
@@ -140,3 +147,4 @@ export async function tenantScope(req, res, next) {
   }
   await next();
 }
+tenantScope.authInfo = { kind: 'tenantScope' }; // V2.9：OpenAPI 标记
