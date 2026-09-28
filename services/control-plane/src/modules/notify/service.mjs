@@ -6,6 +6,8 @@
  *   自定义机器人 webhook）；email/sms/im 以 kind 注册位保留，未实现前建通道直接 400。
  * - 密钥铁律：secret_ref 只存 `env:VAR` / `vault:...` 引用，密钥材料发送时即时解析，
  *   永不落库、永不进投递日志。`vault:` 目前抛 NOT_IMPLEMENTED（如实标注）。
+ * - V2.16：也支持直接传 secret 明文建通道，落库时以 AES-256-GCM 信封存于 secret_enc
+ *   （与 secret_ref 二选一）；发送时解密，永不回显。
  * - SSRF 防护：target 必须 http(s)；字面量私网/回环/链路本地 IP 默认拒绝，
  *   主机名做 DNS 解析后验 IP；NOTIFY_ALLOW_PRIVATE_TARGETS=true 才放行（测试/内网 webhook 用）。
  * - 投递账本 notify_deliveries：queued→sent/failed 全轨迹；无通道时记 skipped（显式，
@@ -14,6 +16,10 @@
  * - 载荷脱敏：发送前递归剥离疑似密钥字段。
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { kms, registerEncryptedField } from '../../kernel/kms.mjs';
+
+// V2.16：webhook secret 落库加密（key 轮换 sweep 注册）
+registerEncryptedField({ table: 'notify_channels', fieldCol: 'secret_enc' });
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { db } from '../../db/index.mjs';
@@ -103,7 +109,7 @@ export function sanitizePayload(obj) {
 }
 
 // ---------- 通道 CRUD ----------
-export async function createChannel(tenantId, { kind, name, target, secretRef = null }) {
+export async function createChannel(tenantId, { kind, name, target, secretRef = null, secret = null }) {
   assertId('ten', tenantId);
   if (!CHANNEL_KINDS.has(kind)) {
     throw Errors.badRequest(`通知通道 kind 尚未实现: ${kind}（当前可用: ${[...CHANNEL_KINDS].join(',')}）`,
@@ -112,6 +118,9 @@ export async function createChannel(tenantId, { kind, name, target, secretRef = 
   if (!name || !String(name).trim()) throw Errors.badRequest('name 必填');
   const safeTarget = await assertSafeTarget(target);
   if (secretRef) resolveSecret(secretRef); // 建通道时即验引用有效性（fail-fast，不存明文）
+  if (secretRef && secret) throw Errors.badRequest('secretRef 与 secret 二选一，不能同时传');
+  // V2.16：secret 明文只在此刻出现一次，落库即加密（无 KMS key 时 fail-closed）
+  const secretEnc = secret ? kms.encrypt(String(secret)) : null;
   const row = {
     id: newId('nch'), tenant_id: tenantId, kind,
     name: String(name).trim(), target: safeTarget, secret_ref: secretRef,
@@ -119,9 +128,9 @@ export async function createChannel(tenantId, { kind, name, target, secretRef = 
   };
   try {
     await db().query(
-      `INSERT INTO notify_channels(id,tenant_id,kind,name,target,secret_ref,status,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
-      [row.id, row.tenant_id, row.kind, row.name, row.target, row.secret_ref, row.status, row.created_at, row.updated_at]);
+      `INSERT INTO notify_channels(id,tenant_id,kind,name,target,secret_ref,secret_enc,status,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [row.id, row.tenant_id, row.kind, row.name, row.target, row.secret_ref, secretEnc, row.status, row.created_at, row.updated_at]);
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) throw Errors.conflict(`通知通道名已存在: ${row.name}`);
     throw e;
@@ -134,11 +143,11 @@ export async function createChannel(tenantId, { kind, name, target, secretRef = 
 export async function listChannels(tenantId) {
   assertId('ten', tenantId);
   const rows = await db().query(
-    'SELECT id,tenant_id,kind,name,target,secret_ref,status,created_at,updated_at FROM notify_channels WHERE tenant_id=? ORDER BY created_at',
+    'SELECT id,tenant_id,kind,name,target,secret_ref,secret_enc,status,created_at,updated_at FROM notify_channels WHERE tenant_id=? ORDER BY created_at',
     [tenantId]);
   return rows.map((r) => {
-    const { secret_ref, ...rest } = r;
-    return { ...rest, has_secret: !!secret_ref };
+    const { secret_ref, secret_enc, ...rest } = r;
+    return { ...rest, has_secret: !!secret_ref || !!secret_enc };
   });
 }
 
@@ -160,6 +169,10 @@ export async function updateChannel(tenantId, channelId, patch = {}) {
   if (patch.secretRef !== undefined) {
     if (patch.secretRef) resolveSecret(patch.secretRef);
     sets.push('secret_ref=?'); args.push(patch.secretRef || null);
+  }
+  if (patch.secret !== undefined) {
+    // V2.16：secret 明文只在此刻出现，落库即加密；null/'' 清空
+    sets.push('secret_enc=?'); args.push(patch.secret ? kms.encrypt(String(patch.secret)) : null);
   }
   if (patch.status !== undefined) {
     if (!CHANNEL_STATUSES.has(patch.status)) throw Errors.badRequest(`非法状态: ${patch.status}`);
@@ -205,8 +218,19 @@ function signPayload(secret, body) {
   return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
 }
 
+/**
+ * V2.16：解析通道签名密钥。secret_enc（密文落库）优先于 secret_ref（环境变量引用）。
+ * 解密失败抛 FIELD_DECRYPT_FAILED（500，不静默降级为无签名发送）。
+ */
+export function resolveChannelSecret(channel) {
+  if (!channel) return null;
+  if (channel.secret_enc) return kms.decrypt(channel.secret_enc);
+  if (channel.secret_ref) return resolveSecret(channel.secret_ref);
+  return null;
+}
+
 async function postWebhook(channel, deliveryId, intent, payload) {
-  const secret = resolveSecret(channel.secret_ref); // 发送时即时解析
+  const secret = resolveChannelSecret(channel); // 发送时即时解析
   const body = JSON.stringify({ intent, delivery_id: deliveryId, tenant_id: channel.tenant_id, ...payload });
   const headers = {
     'content-type': 'application/json',

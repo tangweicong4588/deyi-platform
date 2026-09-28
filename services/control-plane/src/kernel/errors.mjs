@@ -28,7 +28,8 @@ export const Errors = {
   approvalRequired: (approvalId) =>
     new PlatformError('APPROVAL_REQUIRED', '该操作需要审批', { status: 403, details: { approvalId } }),
   upstream: (msg, details) => new PlatformError('UPSTREAM_ERROR', msg, { status: 502, details }),
-  internal: (msg = '内部错误') => new PlatformError('INTERNAL', msg, { status: 500 }),
+  serviceUnavailable: (msg, details) => new PlatformError('SERVICE_UNAVAILABLE', msg, { status: 503, details }),
+  internal: (msg = '内部错误', details) => new PlatformError('INTERNAL', msg, { status: 500, details }),
 };
 
 /** 把错误转成对外 JSON（500 不泄露内部细节） */

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 
 // 必须在 import 业务模块之前设置（config 在 import 时加载）
 // 注意：故意不设 OIDC_*，覆盖"OIDC 未配置"路径（配置态见 oidc-client.test.mjs）
@@ -11,6 +12,8 @@ process.env.SQLITE_PATH = join(mkdtempSync(join(tmpdir(), 'deyi-test-')), 'test.
 process.env.OPERATOR_TOKEN = 'op_test_token';
 process.env.DEV_IDP_SECRET = 'test-local-jwt-secret';
 process.env.BOOTSTRAP_ENABLED = 'false';
+process.env.FIELD_ENCRYPTION_KEY = randomBytes(32).toString('base64'); // V2.16：TOTP 加密
+process.env.FIELD_ENCRYPTION_KEY_ID = 'test-k1';
 
 const { openDb, db } = await import('../src/db/index.mjs');
 const { migrate } = await import('../src/db/migrate.mjs');

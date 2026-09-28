@@ -30,6 +30,11 @@ const DEF = {
   // 轮换方法：新 pepper → API_KEY_PEPPER；旧 pepper 移入 _PREVIOUS（逗号分隔），
   // 旧 key 在过渡期内仍可校验；确认全部轮换/过期后再从 _PREVIOUS 移除
   API_KEY_PEPPER_PREVIOUS: '',
+  // V2.16 敏感字段落库加密（KMS）：本地 AES-256-GCM 信封加密
+  FIELD_ENCRYPTION_KEY: '',      // base64 32B；生产必须设置（缺失时敏感字段写操作 fail-closed）
+  FIELD_ENCRYPTION_KEY_ID: 'local-1', // 当前 key 版本 id（写进信封，轮换时换新 id）
+  FIELD_ENCRYPTION_KEY_PREVIOUS: '',  // 旧 key（id:base64 逗号分隔），解密旧信封用
+  KMS_PROVIDER: 'local',         // local | aws | gcp | alibaba（非 local 暂未实现，预留接口）
   OPA_URL: '',               // 设了就走 OPA，否则用内置策略引擎
   LITELLM_URL: '',           // 设了模型调用就走 LiteLLM，否则直连 Provider（需显式允许）
   LITELLM_MASTER_KEY: '',      // 调用 LiteLLM 的内部 master key（不对外）
@@ -85,6 +90,7 @@ function load() {
     if (!cfg.AUDIT_ANCHOR_URL) missing.push('AUDIT_ANCHOR_URL（生产审计链必须外部锚定）');
     if (cfg.bootstrapEnabled) missing.push('BOOTSTRAP_ENABLED（生产禁止自动 bootstrap）');
     if (!cfg.API_KEY_PEPPER) prodWarnings.push('API_KEY_PEPPER 未设置：API Key hash 缺少服务端 pepper 纵深（建议设置）');
+    if (!cfg.FIELD_ENCRYPTION_KEY) prodWarnings.push('FIELD_ENCRYPTION_KEY 未设置：TOTP secret 等敏感字段写操作将 fail-closed（503），生产必须设置');
     // 生产 fake 适配器显式告警（H-7 安全 review）：缺失即静默回退 fake，必须让运维看见
     if (!cfg.GITEA_URL) prodWarnings.push('GITEA_URL 未设置：仓库服务将使用 fake 适配器（simulated），生产请接入真 Gitea');
     if (!cfg.TEMPORAL_ADDRESS) prodWarnings.push('TEMPORAL_ADDRESS 未设置：工作流将使用内置执行器，生产请接入 Temporal');

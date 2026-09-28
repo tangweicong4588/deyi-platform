@@ -20,6 +20,8 @@ import {
 import { provisionTenant } from './provision.mjs';
 import { dryRunOffboard, confirmOffboard } from './offboard.mjs';
 import { mintKey } from './keys.mjs';
+import { db } from '../../db/index.mjs';
+import { kms, rotateSweep } from '../../kernel/kms.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
 import { alertTenantSuspended } from '../notify/alerts.mjs';
 import {
@@ -81,6 +83,23 @@ export function registerIdentityRoutes(app) {
   // V2.12：租户 offboard（销户），provision 的反操作。两阶段：
   // phase=dryRun → 统计 + 合规包 manifest + confirm_token（不删除）；
   // phase=confirm → 校验 token 后执行清除（幂等）。
+  // ---------- V2.16：字段加密 key 管理 ----------
+  // GET 状态（不含 key 材料）；POST rotate-sweep 把旧 kekId 的行重加密为当前 key。
+  // 轮换操作流程：运维设置新 FIELD_ENCRYPTION_KEY + 新 FIELD_ENCRYPTION_KEY_ID，
+  // 旧 key 移入 FIELD_ENCRYPTION_KEY_PREVIOUS → 调本接口 sweep → 确认后下线旧 key。
+  app.get('/v1/admin/security/field-keys/status', authenticate, requireOperator, async (req, res) => {
+    ok(res, kms.status());
+  });
+  app.post('/v1/admin/security/field-keys/rotate-sweep', authenticate, requireOperator, async (req, res) => {
+    const out = await rotateSweep(db());
+    await tryAudit({
+      tenantId: null, actorId: ctx().actorId, action: 'security.field-keys.rotate-sweep',
+      resourceKind: 'security', resourceId: 'field-keys',
+      payload: { scanned: out.scanned, rotated: out.rotated },
+    }).catch(() => {});
+    ok(res, out);
+  });
+
   app.post('/v1/admin/tenants/:tenantId/offboard', authenticate, requireOperator, async (req, res) => {
     const { phase, confirm_token: confirmToken } = req.body || {};
     if (phase === 'dryRun') {

@@ -3,7 +3,8 @@
  *
  * 替代 Keycloak 的重量级方案，覆盖：
  * - 本地用户：租户内 username + scrypt 密码哈希（见 passwords.mjs）
- * - TOTP 二次验证（见 totp.mjs；totp_secret 明文存储，V2.16 统一加密，见迁移注释）
+ * - TOTP 二次验证（见 totp.mjs；totp_secret 以 AES-256-GCM 信封存于 totp_secret_enc，
+ *   V2.16；历史明文列 lazy 迁移，见 readTotpSecret）
  * - 会话：短期 access JWT（15min，HS256）+ 可轮换 refresh token（7d，库中只存 sha256）
  * - 登录失败锁定：15min 内 5 次失败 → 锁定 15min；登录尝试记 login_attempts（审计+锁定依据）
  * - 登录成功/失败/锁定走审计链（tryAudit，best-effort）
@@ -21,6 +22,10 @@ import { getTenant, getTenantBySlug, createActor, getActor } from './store.mjs';
 import { hashPassword, verifyPassword, assertPasswordPolicy } from './passwords.mjs';
 import { generateTotpSecret, verifyTotp, otpauthUrl } from './totp.mjs';
 import { tryAudit } from '../evidence/audit.mjs';
+import { kms, registerEncryptedField } from '../../kernel/kms.mjs';
+
+// V2.16：totp_secret 落库加密（key 轮换 sweep 注册）
+registerEncryptedField({ table: 'local_credentials', fieldCol: 'totp_secret_enc' });
 
 export const ACCESS_TTL_MS = 15 * 60 * 1000;
 export const REFRESH_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -60,6 +65,46 @@ const getCred = async (tenantId, username, h = db()) => {
     'SELECT * FROM local_credentials WHERE tenant_id=? AND username=?', [tenantId, username]);
   return rows[0] || null;
 };
+
+/**
+ * V2.16：读取 TOTP secret（统一走密文列）。
+ * - totp_secret_enc 存在 → 解密；篡改/解密失败返回 null（登录路径按"验证码错误" 401 处理，不泄露内部错误）。
+ * - 仅有历史明文 totp_secret → lazy 迁移：best-effort 加密回写（KMS 未配置时跳过迁移，登录仍可用）；
+ *   迁移失败（503）不阻塞登录。
+ * 返回 secret 明文或 null。
+ */
+async function readTotpSecret(cred) {
+  if (!cred) return null;
+  if (cred.totp_secret_enc) {
+    try {
+      return kms.decrypt(cred.totp_secret_enc);
+    } catch (e) {
+      if (e?.details?.code === 'FIELD_DECRYPT_FAILED') return null; // 篡改 → 视为无效
+      throw e;
+    }
+  }
+  if (cred.totp_secret) {
+    const plaintext = cred.totp_secret;
+    try {
+      const enc = kms.encrypt(plaintext);
+      await db().run('UPDATE local_credentials SET totp_secret_enc=?, totp_secret=NULL, updated_at=? WHERE id=?',
+        [enc, nowMs(), cred.id]);
+      cred.totp_secret_enc = enc;
+      cred.totp_secret = null;
+    } catch (e) {
+      if (e?.details?.code !== 'FIELD_ENCRYPTION_UNCONFIGURED') throw e;
+      // KMS 未配置：跳过迁移，登录仍用明文（新 setup 已 fail-closed，此处保可用）
+    }
+    return plaintext;
+  }
+  return null;
+}
+
+/** 管理路径（setup/enable 已鉴权）用的严格读取：解密失败直接抛 500，不吞错。 */
+async function readTotpSecretStrict(cred) {
+  if (cred?.totp_secret_enc) return kms.decrypt(cred.totp_secret_enc);
+  return readTotpSecret(cred);
+}
 
 /** 创建本地用户：actor（user）+ 凭证。调用方负责鉴权（租户 admin / operator）。 */
 export async function createLocalUser(tenantId, { username, password, name, email = null }) {
@@ -159,7 +204,8 @@ export async function loginWithPassword({ tenant, username, password, totpCode, 
     throw Errors.unauthorized('主体无效');
   }
   if (cred.totp_enabled) {
-    if (!verifyTotp(cred.totp_secret, totpCode || '')) {
+    const totpSecret = await readTotpSecret(cred);
+    if (!verifyTotp(totpSecret || '', totpCode || '')) {
       const e = Errors.unauthorized(totpCode ? '二次验证码错误' : '需要二次验证码');
       e.details = { ...(e.details || {}), code: 'TOTP_REQUIRED' };
       throw e;
@@ -202,8 +248,10 @@ export async function setupTotp(tenantId, actorId) {
     'SELECT * FROM local_credentials WHERE tenant_id=? AND actor_id=?', [tenantId, actorId]))[0];
   if (!cred) throw Errors.notFound('本地凭证不存在');
   const secret = generateTotpSecret();
-  await db().run('UPDATE local_credentials SET totp_secret=?, totp_enabled=0, updated_at=? WHERE id=?',
-    [secret, nowMs(), cred.id]);
+  // V2.16：只存密文（无 KMS key 时 fail-closed，不落明文）
+  const enc = kms.encrypt(secret);
+  await db().run('UPDATE local_credentials SET totp_secret_enc=?, totp_secret=NULL, totp_enabled=0, updated_at=? WHERE id=?',
+    [enc, nowMs(), cred.id]);
   const actor = await getActor(tenantId, actorId).catch(() => null);
   return {
     secret,
@@ -219,8 +267,9 @@ export async function setupTotp(tenantId, actorId) {
 export async function enableTotp(tenantId, actorId, code) {
   const cred = (await db().query(
     'SELECT * FROM local_credentials WHERE tenant_id=? AND actor_id=?', [tenantId, actorId]))[0];
-  if (!cred || !cred.totp_secret) throw Errors.badRequest('请先 setup 生成 secret');
-  if (!verifyTotp(cred.totp_secret, code || '')) throw Errors.badRequest('验证码错误');
+  const pending = await readTotpSecretStrict(cred);
+  if (!cred || !pending) throw Errors.badRequest('请先 setup 生成 secret');
+  if (!verifyTotp(pending, code || '')) throw Errors.badRequest('验证码错误');
   await db().run('UPDATE local_credentials SET totp_enabled=1, updated_at=? WHERE id=?', [nowMs(), cred.id]);
   await auditLogin(tenantId, actorId, 'auth.totp.enabled', {});
   return { enabled: true };
@@ -232,7 +281,7 @@ export async function disableTotp(tenantId, actorId, password) {
     'SELECT * FROM local_credentials WHERE tenant_id=? AND actor_id=?', [tenantId, actorId]))[0];
   if (!cred) throw Errors.notFound('本地凭证不存在');
   if (!await verifyPassword(password || '', cred.password_hash)) throw Errors.unauthorized('密码错误');
-  await db().run('UPDATE local_credentials SET totp_secret=NULL, totp_enabled=0, updated_at=? WHERE id=?',
+  await db().run('UPDATE local_credentials SET totp_secret=NULL, totp_secret_enc=NULL, totp_enabled=0, updated_at=? WHERE id=?',
     [nowMs(), cred.id]);
   await auditLogin(tenantId, actorId, 'auth.totp.disabled', {});
   return { enabled: false };

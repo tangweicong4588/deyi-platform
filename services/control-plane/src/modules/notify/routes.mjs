@@ -17,15 +17,16 @@ export function registerNotifyRoutes(app) {
   const R = (p) => `/v1/tenants/:tenantId/notify${p}`;
 
   app.post(R('/channels'), ...admin, async (req, res) => {
-    const { kind, name, target, secretRef } = req.body || {};
-    ok(res, await createChannel(req.params.tenantId, { kind, name, target, secretRef }), 201);
+    // V2.16：secret 明文仅经 HTTPS 到达此处，落库即加密，永不回显/记日志
+    const { kind, name, target, secretRef, secret } = req.body || {};
+    ok(res, await createChannel(req.params.tenantId, { kind, name, target, secretRef, secret }), 201);
   });
   app.get(R('/channels'), ...admin, async (req, res) => {
     ok(res, await listChannels(req.params.tenantId));
   });
   app.patch(R('/channels/:channelId'), ...admin, async (req, res) => {
-    const { name, target, secretRef, status } = req.body || {};
-    ok(res, await updateChannel(req.params.tenantId, req.params.channelId, { name, target, secretRef, status }));
+    const { name, target, secretRef, secret, status } = req.body || {};
+    ok(res, await updateChannel(req.params.tenantId, req.params.channelId, { name, target, secretRef, secret, status }));
   });
   app.delete(R('/channels/:channelId'), ...admin, async (req, res) => {
     await deleteChannel(req.params.tenantId, req.params.channelId);
