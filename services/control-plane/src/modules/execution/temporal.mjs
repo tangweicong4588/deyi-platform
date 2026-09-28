@@ -7,8 +7,10 @@
  * - /readyz 上报：probeTemporal() 在启动时探测；temporalLive() 仅供状态展示，
  *   执行路径不依赖缓存状态（提交失败即降级，防"探活时正常、执行时挂了"的竞态）。
  *
- * 联调状态（M-12 review 如实声明）：Temporal live 路径尚未与真实 Temporal 联调，
- * HTTP API 契约基于 Temporal 文档推断；生产上线前必须端到端验证。
+ * 联调状态：2026-09-28 已与真实 Temporal 1.28（start-dev）HTTP API 联调：
+ * probe/describe/terminate/submit 全部真实通过；submit 路径曾按文档推断写成集合路径，
+ * 实测返回 501，已修正为 /workflows/{workflowId}。cancel 在无 worker 时服务端不推进状态，
+ * 生产需配 worker；terminate 可作为兜底。
  */
 import { config } from '../../kernel/config.mjs';
 import { logger } from '../../kernel/logging.mjs';
@@ -64,18 +66,22 @@ export async function probeTemporal() {
  * 返回 { workflowId, runId }；失败抛错 → 调用方降级本地执行。
  */
 export async function submitWorkflow({ namespace, workflowId, input, workflowType = 'deyi.toolCall', taskQueue = TASK_QUEUE }) {
-  const json = await tfetch(`/api/v1/namespaces/${encodeURIComponent(namespace)}/workflows`, {
-    method: 'POST',
-    body: {
-      workflowId,
-      workflowType: { name: workflowType },
-      taskQueue: { name: taskQueue },
-      workflowExecutionTimeout: '3600s',
-      input: {
-        payloads: [{ data: Buffer.from(JSON.stringify(input)).toString('base64') }],
+  // Temporal HTTP API 约定：POST /api/v1/namespaces/{ns}/workflows/{workflowId}（ID 在路径，不在 body）。
+  // 2026-09-28 live 验证：POST 到集合路径返回 501 UNIMPLEMENTED，此处已按真实 API 修正。
+  const json = await tfetch(
+    `/api/v1/namespaces/${encodeURIComponent(namespace)}/workflows/${encodeURIComponent(workflowId)}`,
+    {
+      method: 'POST',
+      body: {
+        workflowType: { name: workflowType },
+        taskQueue: { name: taskQueue },
+        workflowExecutionTimeout: '3600s',
+        input: {
+          payloads: [{ data: Buffer.from(JSON.stringify(input)).toString('base64') }],
+        },
       },
     },
-  });
+  );
   return { workflowId, runId: json.runId || json?.workflowExecution?.runId || null };
 }
 

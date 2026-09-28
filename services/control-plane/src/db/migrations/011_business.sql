@@ -18,8 +18,8 @@ CREATE TABLE IF NOT EXISTS business_intents (
   status TEXT NOT NULL DEFAULT 'draft'
     CHECK (status IN ('draft','planned','approved','executing','done','rejected','cancelled')),
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bint_tenant ON business_intents(tenant_id, project_id, created_at);
 
@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS business_plans (
   ontology_gaps TEXT NOT NULL DEFAULT '[]',     -- 未映射本体概念 [{concept, candidate_term_id}]
   dryrun_report TEXT NOT NULL DEFAULT '{}',     -- 最近一次 dry-run 明细
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bplan_intent ON business_plans(intent_id);
 CREATE INDEX IF NOT EXISTS idx_bplan_tenant ON business_plans(tenant_id, project_id, created_at);
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS business_actions (
   plan_id TEXT NOT NULL REFERENCES business_plans(id),
   tenant_id TEXT NOT NULL REFERENCES tenants(id),
   project_id TEXT NOT NULL REFERENCES projects(id),
-  seq INTEGER NOT NULL,                         -- 计划内顺序
+  seq BIGINT NOT NULL,                         -- 计划内顺序
   tool_ref TEXT,                                -- P6 已注册工具 ID（tool_）；未注册时为 NULL，dry-run 阻断
   tool_name TEXT NOT NULL DEFAULT '',           -- 逻辑工具名（模板声明，便于排查）
   args TEXT NOT NULL DEFAULT '{}',              -- 动作参数（已过密钥校验）
@@ -56,8 +56,8 @@ CREATE TABLE IF NOT EXISTS business_actions (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','dryrun_ok','dryrun_blocked','approved','executing','done','failed','compensated')),
   dryrun_reasons TEXT NOT NULL DEFAULT '[]',    -- 阻断原因清单
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
   UNIQUE (tenant_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_bact_plan ON business_actions(plan_id, seq);

@@ -3,5 +3,5 @@
 -- 与业务表无关，无触发器、无审计；PG / SQLite 双库通用。
 CREATE TABLE IF NOT EXISTS readiness_probe (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  checked_at INTEGER NOT NULL
+  checked_at BIGINT NOT NULL
 );

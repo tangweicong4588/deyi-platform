@@ -98,10 +98,12 @@ const fakeTemporal = createServer((req, res) => {
       res.end(JSON.stringify(obj));
     };
     if (req.method === 'GET' && req.url === '/api/v1/namespaces') return json(200, { namespaces: [] });
-    if (req.method === 'POST' && /\/workflows$/.test(req.url)) {
+    // 真实 Temporal HTTP API：submit 是 POST /workflows/{workflowId}（ID 在路径）
+    const sm = req.method === 'POST' && req.url.match(/\/workflows\/([^/?]+)$/);
+    if (sm) {
       if (temporalDown) return json(500, { error: 'temporal down in test' });
       const body = JSON.parse(raw || '{}');
-      const wid = body.workflowId;
+      const wid = decodeURIComponent(sm[1]);
       let input = {};
       try {
         const b64 = body.input?.payloads?.[0]?.data;
@@ -391,9 +393,9 @@ test('Temporal live：namespace 租户隔离 + workflowId=execution ID', async (
   assert.equal(execution.status, 'succeeded');
   assert.equal(execution.engine, 'temporal');
   const expectedNs = temporal.namespaceFor(tenant.id);
-  const submit = temporalSeen.find((s) => s.method === 'POST' && /\/workflows$/.test(s.url));
+  const submit = temporalSeen.find((s) => s.method === 'POST' && /\/workflows\//.test(s.url));
   assert.ok(submit, '应有 workflow 提交');
-  assert.ok(submit.url.includes(`/namespaces/${expectedNs}/`), `namespace 应为 ${expectedNs}`);
+  assert.ok(submit.url.includes(`/namespaces/${expectedNs}/workflows/${execution.id}`), `namespace 与 workflowId 应正确`);
   const describe = temporalSeen.find((s) => s.method === 'GET' && s.url.includes(execution.id));
   assert.ok(describe, 'workflowId 应为 execution 平台 ID');
 });

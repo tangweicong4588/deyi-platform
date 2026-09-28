@@ -18,8 +18,10 @@ const opt = (k) => {
   return i >= 0 ? args[i + 1] : null;
 };
 const dbPath = opt('--db');
-if (dbPath) process.env.SQLITE_PATH = dbPath;
-delete process.env.DATABASE_URL; // --db 显式指定时强制走 SQLite
+if (dbPath) {
+  process.env.SQLITE_PATH = dbPath;
+  delete process.env.DATABASE_URL; // --db 显式指定时才强制走 SQLite
+}
 if (!dbPath && !process.env.SQLITE_PATH && !process.env.DATABASE_URL) {
   console.error('用法: node scripts/backup-verify.mjs --db <restored.db>（或设 SQLITE_PATH / DATABASE_URL）');
   process.exit(2);

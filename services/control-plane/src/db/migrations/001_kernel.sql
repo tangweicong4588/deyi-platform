@@ -6,8 +6,8 @@ CREATE TABLE IF NOT EXISTS tenants (
   name TEXT NOT NULL,
   slug TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'active',   -- active | suspended
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS projects (
   name TEXT NOT NULL,
   slug TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
   UNIQUE (tenant_id, slug)
 );
 CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS actors (
   name TEXT NOT NULL,
   email TEXT,
   status TEXT NOT NULL DEFAULT 'active',
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_actors_tenant ON actors(tenant_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_actors_external ON actors(tenant_id, external_id);
@@ -46,9 +46,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT NOT NULL,                    -- sha256 hex（key 本体永不落盘）
   scopes TEXT NOT NULL DEFAULT '[]',         -- JSON 数组
   status TEXT NOT NULL DEFAULT 'active',     -- active | revoked
-  expires_at INTEGER,
-  last_used_at INTEGER,
-  created_at INTEGER NOT NULL
+  expires_at BIGINT,
+  last_used_at BIGINT,
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix);
 
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS role_bindings (
   actor_id TEXT NOT NULL REFERENCES actors(id),
   project_id TEXT REFERENCES projects(id),  -- NULL = 租户级角色
   role TEXT NOT NULL,                        -- admin | operator | viewer
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE (tenant_id, actor_id, project_id, role)
 );
 CREATE INDEX IF NOT EXISTS idx_roles_actor ON role_bindings(tenant_id, actor_id);

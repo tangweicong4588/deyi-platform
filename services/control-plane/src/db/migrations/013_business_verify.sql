@@ -16,7 +16,7 @@
 ALTER TABLE action_executions ADD COLUMN verify_status TEXT NOT NULL DEFAULT 'unverified'
   CHECK (verify_status IN ('unverified','verified','mismatched','unverifiable'));
 ALTER TABLE action_executions ADD COLUMN verify_result TEXT NOT NULL DEFAULT '{}';
-ALTER TABLE action_executions ADD COLUMN verified_at INTEGER;
+ALTER TABLE action_executions ADD COLUMN verified_at BIGINT;
 
 CREATE TABLE reconciliation_items_new (
   id TEXT PRIMARY KEY,                          -- brec_
@@ -31,10 +31,10 @@ CREATE TABLE reconciliation_items_new (
     CHECK (status IN ('open','investigating','resolved','escalated','closed')),
   assignee TEXT,                                -- escalate 指定的处理人（actor id）
   resolution TEXT NOT NULL DEFAULT '{}',        -- {decided_by,decided_at,note,evidence_ref}
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  decided_at INTEGER,
-  closed_at INTEGER
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  decided_at BIGINT,
+  closed_at BIGINT
 );
 INSERT INTO reconciliation_items_new
   (id,tenant_id,project_id,action_id,execution_id,reason,source,status,assignee,

@@ -26,8 +26,8 @@ CREATE TABLE IF NOT EXISTS pull_requests (
   head_commit TEXT NOT NULL DEFAULT '',
   simulated INTEGER NOT NULL DEFAULT 0,         -- 1=fake/未接真 Gitea，绝不伪装
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 -- 同一仓库绑定下远端 PR 编号唯一（防重复登记）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_binding_number

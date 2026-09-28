@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS tools (
     CHECK (status IN ('active','disabled')),
   version INTEGER NOT NULL DEFAULT 1,
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tools_tenant_name
   ON tools(COALESCE(tenant_id, ''), name);
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS tool_credentials (
   id TEXT PRIMARY KEY,
   tool_id TEXT NOT NULL REFERENCES tools(id),
   vault_ref TEXT NOT NULL,                      -- 如 TOOL_X_API_KEY，运行时从环境解析
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE(tool_id, vault_ref)
 );
 
@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS executions (
   result_ref TEXT,                              -- JSON：结果摘要（脱敏、截断）
   engine TEXT,                                  -- temporal | local(fallback)
   error TEXT,                                   -- 失败原因（脱敏、截断）
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_exec_idem
   ON executions(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
@@ -71,22 +71,22 @@ CREATE TABLE IF NOT EXISTS approvals (
     CHECK (status IN ('pending','approved','rejected')),
   decided_by TEXT REFERENCES actors(id),
   reason TEXT,
-  created_at INTEGER NOT NULL,
-  decided_at INTEGER
+  created_at BIGINT NOT NULL,
+  decided_at BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS compensations (
   id TEXT PRIMARY KEY,                          -- cmp_
   execution_id TEXT NOT NULL REFERENCES executions(id),
-  seq INTEGER NOT NULL,                         -- 注册顺序；执行时逆序
+  seq BIGINT NOT NULL,                         -- 注册顺序；执行时逆序
   tool_id TEXT NOT NULL REFERENCES tools(id),
   action TEXT NOT NULL,
   args_redacted TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','done','failed')),
   error TEXT,
-  created_at INTEGER NOT NULL,
-  executed_at INTEGER,
+  created_at BIGINT NOT NULL,
+  executed_at BIGINT,
   UNIQUE(execution_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_cmp_exec ON compensations(execution_id, seq);

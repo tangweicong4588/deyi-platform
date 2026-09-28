@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS fact_snapshots (
   dependencies TEXT NOT NULL DEFAULT '{}',      -- JSON：关键依赖版本
   unknown_items TEXT NOT NULL DEFAULT '[]',     -- JSON：未知项清单（空数组=已确认无未知项）
   recorded_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 -- 每个 facts 阶段运行只认一条快照（登记即覆盖）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_snapshots_run
@@ -46,8 +46,8 @@ CREATE TABLE IF NOT EXISTS clarifications (
   impacts_implementation INTEGER NOT NULL DEFAULT 0, -- 1=回答会改变实现或验收
   created_by TEXT REFERENCES actors(id),
   answered_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  answered_at INTEGER
+  created_at BIGINT NOT NULL,
+  answered_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_clarifications_run
   ON clarifications(pipeline_run_id);
@@ -65,8 +65,8 @@ CREATE TABLE IF NOT EXISTS gate_exceptions (
     CHECK (status IN ('pending','approved','rejected')),
   requested_by TEXT NOT NULL REFERENCES actors(id),
   decided_by TEXT REFERENCES actors(id),
-  decided_at INTEGER,
-  created_at INTEGER NOT NULL
+  decided_at BIGINT,
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gate_exceptions_run
   ON gate_exceptions(pipeline_run_id, status);

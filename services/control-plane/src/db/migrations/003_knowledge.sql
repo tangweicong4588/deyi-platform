@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS documents (
   fail_reason TEXT,
   raw_content TEXT,                             -- 原始上传内容（支持重解析生成新版本；大文件场景由对象存储替代）
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(tenant_id, project_id, status);
 
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS canonical_docs (
   content TEXT NOT NULL,                        -- 解析后的 markdown 真相
   content_hash TEXT NOT NULL,                   -- sha256(content)，去重/变更检测
   parse_engine TEXT NOT NULL DEFAULT 'builtin', -- docling | builtin
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE(document_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_cnd_doc ON canonical_docs(document_id, version);
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS facts (
   source_span TEXT NOT NULL DEFAULT '{}',       -- JSON {start,end}：在 canonical content 中的字符偏移
   embedding_model TEXT NOT NULL DEFAULT 'deyi-embedding',
   status TEXT NOT NULL DEFAULT 'active',        -- active | superseded（被新版本替代）
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_facts_doc ON facts(document_id, status);
 
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS acl_entries (
   grantee_id TEXT NOT NULL,
   permission TEXT NOT NULL DEFAULT 'read',
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE(resource_kind, resource_id, grantee_kind, grantee_id, permission)
 );
 CREATE INDEX IF NOT EXISTS idx_acl_grantee ON acl_entries(tenant_id, grantee_kind, grantee_id);

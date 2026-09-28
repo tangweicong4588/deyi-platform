@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS audit_heads (
   tenant_id TEXT PRIMARY KEY,
   head_seq INTEGER NOT NULL,
   head_hash TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at BIGINT NOT NULL
 );
 -- 存量数据回填检查点
 INSERT INTO audit_heads(tenant_id, head_seq, head_hash, updated_at)

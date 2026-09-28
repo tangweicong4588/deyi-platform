@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS pipeline_templates (
   current_version INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'active',          -- 'active' | 'archived'
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_templates_tenant ON pipeline_templates(tenant_id);
 
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS pipeline_template_versions (
   definition TEXT NOT NULL,                       -- JSON：{params_schema, stages} 不可变快照
   change_note TEXT NOT NULL DEFAULT '',
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE(template_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_template_versions_tpl ON pipeline_template_versions(template_id);
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS pipeline_instances (
   resolved_definition TEXT NOT NULL DEFAULT '{}', -- JSON：实例化时刻的模板版本 definition 快照
   status TEXT NOT NULL DEFAULT 'active',          -- 'active' | 'cancelled'
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE(change_package_id, template_id, template_version)
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_instances_pkg ON pipeline_instances(change_package_id);

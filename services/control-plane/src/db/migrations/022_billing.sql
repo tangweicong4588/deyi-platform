@@ -8,16 +8,16 @@ CREATE TABLE IF NOT EXISTS billing_invoices (
   status TEXT NOT NULL DEFAULT 'draft',       -- draft | finalized | paid | void
   currency TEXT NOT NULL DEFAULT 'CNY',
   plan TEXT NOT NULL,                          -- 出账时套餐快照
-  plan_fee_cents INTEGER NOT NULL DEFAULT 0,
-  usage_cost_cents INTEGER NOT NULL DEFAULT 0,
-  usage_tokens INTEGER NOT NULL DEFAULT 0,
+  plan_fee_cents BIGINT NOT NULL DEFAULT 0,
+  usage_cost_cents BIGINT NOT NULL DEFAULT 0,
+  usage_tokens BIGINT NOT NULL DEFAULT 0,
   usage_calls INTEGER NOT NULL DEFAULT 0,
-  total_cents INTEGER NOT NULL DEFAULT 0,
+  total_cents BIGINT NOT NULL DEFAULT 0,
   line_items_json TEXT NOT NULL DEFAULT '[]', -- [{type, label, amount_cents, ...}]
-  created_at INTEGER NOT NULL,
-  finalized_at INTEGER,
-  paid_at INTEGER,
-  voided_at INTEGER,
+  created_at BIGINT NOT NULL,
+  finalized_at BIGINT,
+  paid_at BIGINT,
+  voided_at BIGINT,
   UNIQUE (tenant_id, period_key)               -- 一账期一账单：幂等生成
 );
 CREATE INDEX IF NOT EXISTS idx_billing_invoices_tenant

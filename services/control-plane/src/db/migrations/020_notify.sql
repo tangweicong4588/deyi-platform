@@ -9,8 +9,8 @@ CREATE TABLE notify_channels (
   target TEXT NOT NULL,           -- webhook URL（非密钥）
   secret_ref TEXT,                -- env:VAR / vault:xxx；NULL=不签名
   status TEXT NOT NULL DEFAULT 'active',  -- active|disabled
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
   UNIQUE(tenant_id, name)
 );
 CREATE INDEX idx_notify_channels_tenant ON notify_channels(tenant_id, status);
@@ -25,7 +25,7 @@ CREATE TABLE notify_deliveries (
   status TEXT NOT NULL,          -- queued|sent|failed|skipped
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX idx_notify_deliveries_tenant ON notify_deliveries(tenant_id, created_at);

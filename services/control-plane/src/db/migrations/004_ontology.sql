@@ -19,8 +19,8 @@ CREATE TABLE IF NOT EXISTS ontology_terms (
   supersedes_id TEXT REFERENCES ontology_terms(id),  -- 版本链：新版本指向被替代的旧版本
   evidence TEXT NOT NULL DEFAULT '[]',          -- JSON [{fact_id, doc_id}]
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ont_project ON ontology_terms(tenant_id, project_id, status);
 CREATE INDEX IF NOT EXISTS idx_ont_name ON ontology_terms(tenant_id, project_id, name_norm, status);
@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS ontology_conflicts (
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved')),
   resolution TEXT,                              -- JSON {strategy: keep|merge|supersede, note}
   resolved_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  resolved_at INTEGER
+  created_at BIGINT NOT NULL,
+  resolved_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_ocf_term ON ontology_conflicts(term_id, status);
 CREATE INDEX IF NOT EXISTS idx_ocf_project ON ontology_conflicts(tenant_id, project_id, status);

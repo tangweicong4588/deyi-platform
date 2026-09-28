@@ -77,8 +77,10 @@ const fakeTemporal = createServer((req, res) => {
     const body = raw ? JSON.parse(raw) : {};
     temporalSeen.push({ method: req.method, url: req.url, body });
     const json = (o) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
-    if (req.method === 'POST' && /\/workflows$/.test(req.url)) {
-      const wid = body.workflowId;
+    // 真实 Temporal HTTP API：submit 是 POST /workflows/{workflowId}（ID 在路径）
+    const sm = req.method === 'POST' && req.url.match(/\/workflows\/([^/?]+)$/);
+    if (sm && !/\/cancel$/.test(req.url)) {
+      const wid = decodeURIComponent(sm[1]);
       let input = {};
       try {
         const b64 = body.input?.payloads?.[0]?.data;
@@ -336,11 +338,11 @@ test('temporal 契约：提交/查询/取消走 fake Temporal，namespace 隔离
     assert.equal(run.status, 'running');
     assert.ok(run.workflow_id);
 
-    const submitted = temporalSeen.find((s) => s.method === 'POST' && /\/workflows$/.test(s.url));
+    const submitted = temporalSeen.find((s) => s.method === 'POST' && /\/workflows\//.test(s.url));
     assert.ok(submitted, '应提交 workflow');
     const ns = ('deyi-' + tenant.id).replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 63);
-    assert.match(submitted.url, new RegExp(`/api/v1/namespaces/${ns}/workflows`));
-    assert.equal(submitted.body.workflowId, run.id);
+    // 真实 Temporal HTTP API：workflowId 在路径里（2026-09-28 live 验证修正）
+    assert.match(submitted.url, new RegExp(`/api/v1/namespaces/${ns}/workflows/${run.id}$`));
     assert.equal(submitted.body.workflowType.name, 'deyi.sagaRun');
     assert.equal(submitted.body.taskQueue.name, 'deyi-sagas');
     const payload = JSON.parse(Buffer.from(submitted.body.input.payloads[0].data, 'base64').toString());

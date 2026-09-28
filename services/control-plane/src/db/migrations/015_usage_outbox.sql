@@ -7,8 +7,8 @@ CREATE TABLE IF NOT EXISTS gateway_usage_outbox (
   payload_json TEXT NOT NULL,   -- persistUsage 的全部记账参数
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
-  created_at INTEGER NOT NULL,
-  processed_at INTEGER          -- 补记成功后置时间；NULL=待处理
+  created_at BIGINT NOT NULL,
+  processed_at BIGINT          -- 补记成功后置时间；NULL=待处理
 );
 CREATE INDEX IF NOT EXISTS idx_usage_outbox_pending
   ON gateway_usage_outbox(processed_at, created_at);

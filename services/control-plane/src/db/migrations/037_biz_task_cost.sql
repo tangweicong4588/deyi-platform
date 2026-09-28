@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS biz_task_cost_links (
   ref_id TEXT NOT NULL,                         -- 被链接实体的 id（run id / assist run id …）
   trace_id TEXT NOT NULL,                       -- model_calls.trace_id
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE (task_id, kind, ref_id)
 );
 CREATE INDEX IF NOT EXISTS idx_btcl_task ON biz_task_cost_links(tenant_id, task_id, created_at);

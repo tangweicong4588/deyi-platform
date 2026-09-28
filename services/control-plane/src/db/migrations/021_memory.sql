@@ -14,9 +14,9 @@ CREATE TABLE memories (
   importance REAL NOT NULL DEFAULT 0.5 CHECK (importance >= 0 AND importance <= 1),
   tags TEXT,                              -- JSON 数组
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','promoted','forgotten')),
-  expires_at INTEGER,                     -- TTL；NULL=不过期
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  expires_at BIGINT,                     -- TTL；NULL=不过期
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX idx_memories_tenant ON memories(tenant_id, status);
 CREATE INDEX idx_memories_lookup ON memories(tenant_id, project_id, kind, status);
@@ -28,7 +28,7 @@ CREATE TABLE memory_links (
   src_memory_id TEXT NOT NULL REFERENCES memories(id),
   dst_memory_id TEXT NOT NULL REFERENCES memories(id),
   relation TEXT NOT NULL CHECK (relation IN ('relates_to','contradicts','supersedes')),
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE(tenant_id, src_memory_id, dst_memory_id, relation)
 );
 CREATE INDEX idx_memory_links_src ON memory_links(src_memory_id);
@@ -44,7 +44,7 @@ CREATE TABLE memory_promotions (
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
   proposed_by TEXT NOT NULL,
   reviewed_by TEXT,
-  created_at INTEGER NOT NULL,
-  reviewed_at INTEGER
+  created_at BIGINT NOT NULL,
+  reviewed_at BIGINT
 );
 CREATE INDEX idx_memory_promotions_tenant ON memory_promotions(tenant_id, status);

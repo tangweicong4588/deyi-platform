@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS requirements (
   source_refs TEXT NOT NULL DEFAULT '[]',       -- JSON：来源引用（事实/工单/聊天记录）
   ontology_term_ids TEXT NOT NULL DEFAULT '[]', -- JSON：关联本体术语 ont_ id
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_requirements_project ON requirements(tenant_id, project_id, status);
 
@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS acceptance_criteria (
   kind TEXT NOT NULL DEFAULT 'auto',           -- auto | manual
   status TEXT NOT NULL DEFAULT 'pending',       -- pending | passed | failed | waived
   evidence_ref TEXT,                            -- 证据引用（artifact id / 外部链接）
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ac_requirement ON acceptance_criteria(requirement_id);
 
@@ -45,8 +45,8 @@ CREATE TABLE IF NOT EXISTS repo_bindings (
   default_branch TEXT NOT NULL DEFAULT 'main',
   credential_ref TEXT,                          -- vault 引用名；绝无明文列
   status TEXT NOT NULL DEFAULT 'active',        -- active | disabled
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_repo_bindings_project ON repo_bindings(tenant_id, project_id);
 
@@ -61,8 +61,8 @@ CREATE TABLE IF NOT EXISTS change_packages (
   status TEXT NOT NULL DEFAULT 'draft',        -- draft|building|verifying|ready_for_review|handed_over|cancelled
   dod_checklist TEXT NOT NULL DEFAULT '{}',     -- JSON：DoD 项清单
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_change_packages_req ON change_packages(requirement_id);
 CREATE INDEX IF NOT EXISTS idx_change_packages_project ON change_packages(tenant_id, project_id, status);
@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   content_hash TEXT NOT NULL,                   -- sha256 十六进制，必填
   uri TEXT NOT NULL DEFAULT '',
   signature TEXT,                               -- 可空；MVP 允许 null
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_package ON artifacts(change_package_id);
 
@@ -87,8 +87,8 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   stage TEXT NOT NULL,                          -- facts|requirements|clarify|develop|handover
   status TEXT NOT NULL DEFAULT 'pending',       -- pending|running|gated|passed|failed|cancelled
   gate_decision TEXT NOT NULL DEFAULT '{}',     -- JSON：门禁结论（通过/阻断+原因）
-  started_at INTEGER,
-  finished_at INTEGER,
-  created_at INTEGER NOT NULL
+  started_at BIGINT,
+  finished_at BIGINT,
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_package ON pipeline_runs(change_package_id);

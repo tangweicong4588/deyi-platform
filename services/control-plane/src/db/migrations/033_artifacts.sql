@@ -18,8 +18,8 @@ CREATE TABLE IF NOT EXISTS artifact_packages (
   description TEXT NOT NULL DEFAULT '',
   retention_days INTEGER,
   created_by TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
   UNIQUE (tenant_id, project_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_packages_proj
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
   metadata TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'active',
   created_by TEXT,
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE (package_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_versions_pkg
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS artifact_links (
   link_kind TEXT NOT NULL,
   link_id TEXT NOT NULL,
   created_by TEXT,
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE (version_id, link_kind, link_id)
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_links_ver ON artifact_links(version_id);

@@ -3,4 +3,4 @@
 -- 宽限期通过复用 expires_at 实现（轮换时设为 now+grace，旧 key 到期自动失效，
 -- verifyApiKey 本就检查 expires_at），无需新状态。
 ALTER TABLE api_keys ADD COLUMN rotated_to TEXT;
-ALTER TABLE api_keys ADD COLUMN rotated_at INTEGER;
+ALTER TABLE api_keys ADD COLUMN rotated_at BIGINT;

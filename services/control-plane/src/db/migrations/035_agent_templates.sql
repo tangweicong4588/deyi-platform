@@ -16,9 +16,9 @@ CREATE TABLE IF NOT EXISTS agent_templates (
   params_schema TEXT NOT NULL DEFAULT '[]',     -- JSON：[{name,type,required,default,options,description}]
   definition_template TEXT NOT NULL DEFAULT '{}', -- JSON：Agent 定义模板，[[param]] 为实例化时参数占位
   created_by TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  archived_at INTEGER
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  archived_at BIGINT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_templates_scope_key
   ON agent_templates(COALESCE(tenant_id, ''), key);
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS agent_template_instances (
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   params TEXT NOT NULL DEFAULT '{}',            -- JSON：实例化时解析后的参数
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agi_tenant
   ON agent_template_instances(tenant_id, project_id, created_at DESC);

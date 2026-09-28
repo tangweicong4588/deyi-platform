@@ -49,8 +49,11 @@ async function main() {
         const cols = Object.keys(row);
         const vals = cols.map((c) => (typeof row[c] === 'object' && row[c] !== null ? JSON.stringify(row[c]) : row[c]));
         const q = tx || db();
-        const r = await q.run(
-          `INSERT ${ignore} INTO ${table}(${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`, vals);
+        // PG 语法：INSERT INTO ... VALUES (...) ON CONFLICT DO NOTHING（冲突子句在末尾）
+        const sql = db().kind === 'pg'
+          ? `INSERT INTO ${table}(${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')}) ${ignore}`
+          : `INSERT ${ignore} INTO ${table}(${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`;
+        const r = await q.run(sql, vals);
         inserted += r.changes || 0;
       }
       report.tables[table] = { rows: rows.length, inserted, skipped: rows.length - inserted };

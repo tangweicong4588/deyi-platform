@@ -52,7 +52,11 @@ if [[ "${YES}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
   [[ "${ans}" == "yes" ]] || { echo "已取消"; exit 0; }
 fi
 
-# 4. 恢复（单事务，失败整体回滚；并行 4 job 加速大数据量）
+# 4. 恢复（单事务，失败整体回滚）。
+# 注意：pg_restore 不允许 --single-transaction 与 --jobs 并用（PG 16 实测：
+# "cannot specify both --single-transaction and multiple jobs"）。
+# 原子恢复语义优先于并行速度，故只保留 --single-transaction；超大库如需并行，
+# 应拆分为"先并行恢复到暂存库、校验通过后再切换"的两阶段流程（见 runbook）。
 echo "开始恢复..."
-run pg_restore --dbname="${PGDATABASE}" --single-transaction --jobs=4 --verbose "${DUMP}" 2>&1 | tail -5
+run pg_restore --dbname="${PGDATABASE}" --single-transaction --verbose "${DUMP}" 2>&1 | tail -5
 echo "恢复完成。下一步：./deploy/backup/verify-backup.sh --pg <(目标库连接串)> 做完整性校验。"

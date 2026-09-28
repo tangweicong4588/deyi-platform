@@ -14,9 +14,9 @@ CREATE TABLE IF NOT EXISTS agents (
   name TEXT NOT NULL,
   description TEXT,
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  archived_at INTEGER,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  archived_at BIGINT,
   UNIQUE (tenant_id, project_id, key)
 );
 CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id, project_id);
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS agent_versions (
   version INTEGER NOT NULL,
   definition TEXT NOT NULL,              -- 不可变 JSON 快照
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE (agent_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_versions_agent ON agent_versions(agent_id, version);
@@ -48,9 +48,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   output TEXT,
   error TEXT,
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  finished_at INTEGER
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  finished_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(tenant_id, agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(tenant_id, status);
@@ -59,15 +59,15 @@ CREATE TABLE IF NOT EXISTS agent_run_steps (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
-  seq INTEGER NOT NULL,
+  seq BIGINT NOT NULL,
   node_id TEXT NOT NULL,
   node_type TEXT NOT NULL,               -- llm | tool | hitl
   status TEXT NOT NULL DEFAULT 'ok',     -- ok | failed | skipped | waiting | approved | rejected
   input TEXT,
   output TEXT,                           -- 脱敏后的节点输出（密钥只存 sha256）
-  started_at INTEGER NOT NULL,
-  finished_at INTEGER,
-  created_at INTEGER NOT NULL,
+  started_at BIGINT NOT NULL,
+  finished_at BIGINT,
+  created_at BIGINT NOT NULL,
   UNIQUE (run_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_run_steps_run ON agent_run_steps(run_id, seq);
@@ -80,10 +80,10 @@ CREATE TABLE IF NOT EXISTS agent_approvals (
   status TEXT NOT NULL DEFAULT 'pending',-- pending|approved|rejected
   payload TEXT,                          -- 呈交审批人阅读的上下文摘要（JSON，脱敏）
   requested_by TEXT NOT NULL,
-  requested_at INTEGER NOT NULL,
+  requested_at BIGINT NOT NULL,
   decided_by TEXT,
-  decided_at INTEGER,
+  decided_at BIGINT,
   note TEXT,
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_approvals_run ON agent_approvals(run_id);

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS deploy_environments (
   project_id TEXT NOT NULL REFERENCES projects(id),
   key TEXT NOT NULL,
   name TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE (project_id, key)
 );
 
@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS releases (
   deploy_spec TEXT NOT NULL DEFAULT '{}',           -- {commands:[[argv...]], env:{}}
   health_check_spec TEXT NOT NULL DEFAULT '{}',     -- {commands:[[argv...]]}
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_releases_tp ON releases(tenant_id, project_id, status);
 CREATE INDEX IF NOT EXISTS idx_releases_env ON releases(environment_id);
@@ -43,14 +43,14 @@ CREATE TABLE IF NOT EXISTS release_steps (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL REFERENCES tenants(id),
   release_id TEXT NOT NULL REFERENCES releases(id),
-  seq INTEGER NOT NULL,
+  seq BIGINT NOT NULL,
   kind TEXT NOT NULL,                              -- deploy|health_check|promote|rollback|verify
   label TEXT NOT NULL,
   target TEXT NOT NULL DEFAULT '{}',               -- {percentage}|{slot}|{batch}
   status TEXT NOT NULL DEFAULT 'pending',           -- pending|running|succeeded|failed|skipped
   result TEXT NOT NULL DEFAULT '{}',               -- {simulated, exit_code, ...}
-  started_at INTEGER,
-  finished_at INTEGER,
-  created_at INTEGER NOT NULL
+  started_at BIGINT,
+  finished_at BIGINT,
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_release_steps_rel ON release_steps(release_id, seq);

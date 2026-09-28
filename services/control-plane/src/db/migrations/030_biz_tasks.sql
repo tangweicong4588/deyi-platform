@@ -16,15 +16,15 @@ CREATE TABLE IF NOT EXISTS biz_tasks (
   priority TEXT NOT NULL DEFAULT 'normal',         -- 'low' | 'normal' | 'high' | 'urgent'
   requester_id TEXT NOT NULL REFERENCES actors(id),
   assignee_id TEXT REFERENCES actors(id),
-  sla_due_at INTEGER,                              -- 毫秒时间戳，NULL=无 SLA
+  sla_due_at BIGINT,                              -- 毫秒时间戳，NULL=无 SLA
   sla_hours INTEGER,
   escalated INTEGER NOT NULL DEFAULT 0,
-  escalated_at INTEGER,
+  escalated_at BIGINT,
   payload TEXT NOT NULL DEFAULT '{}',
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  closed_at INTEGER
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  closed_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_biz_tasks_tp ON biz_tasks(tenant_id, project_id, status);
 CREATE INDEX IF NOT EXISTS idx_biz_tasks_sla ON biz_tasks(tenant_id, sla_due_at);
@@ -37,6 +37,6 @@ CREATE TABLE IF NOT EXISTS biz_task_transitions (
   to_status TEXT NOT NULL,
   actor_id TEXT NOT NULL,
   note TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_biz_task_transitions_task ON biz_task_transitions(task_id);

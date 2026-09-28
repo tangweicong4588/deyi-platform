@@ -26,7 +26,7 @@ const MIGRATE_LOCK_ID = 4207001;
 
 const DDL = `CREATE TABLE IF NOT EXISTS _migrations (
   name TEXT PRIMARY KEY,
-  applied_at INTEGER NOT NULL
+  applied_at BIGINT NOT NULL
 )`;
 
 async function loadMod(f) {

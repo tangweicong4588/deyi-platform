@@ -31,9 +31,9 @@ CREATE TABLE IF NOT EXISTS runner_runs (
   artifacts_json TEXT NOT NULL DEFAULT '[]',    -- [{artifactId, kind, path, contentHash}]
   duration_ms INTEGER,
   created_by TEXT REFERENCES actors(id),
-  started_at INTEGER,
-  finished_at INTEGER,
-  created_at INTEGER NOT NULL
+  started_at BIGINT,
+  finished_at BIGINT,
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_runner_runs_chg ON runner_runs(change_package_id);
 CREATE INDEX IF NOT EXISTS idx_runner_runs_tenant ON runner_runs(tenant_id);

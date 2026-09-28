@@ -30,8 +30,8 @@ const NEW_TABLE_DDL = `CREATE TABLE business_plans_new (
   ontology_gaps TEXT NOT NULL DEFAULT '[]',
   dryrun_report TEXT NOT NULL DEFAULT '{}',
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 )`;
 const COLS = 'id,intent_id,tenant_id,project_id,status,risk_estimate,ontology_gaps,dryrun_report,created_by,created_at,updated_at';
 

@@ -18,12 +18,12 @@ CREATE TABLE IF NOT EXISTS credential_grants (
   project_id TEXT NOT NULL REFERENCES projects(id),
   action_id TEXT NOT NULL REFERENCES business_actions(id),
   scope TEXT NOT NULL DEFAULT '{}',             -- {tool_id, tool_action, args_hash}，执行时逐项核对
-  expires_at INTEGER NOT NULL,                  -- 短期 TTL（默认 15 分钟）
+  expires_at BIGINT NOT NULL,                  -- 短期 TTL（默认 15 分钟）
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active','used','expired','revoked')),
-  used_at INTEGER,
+  used_at BIGINT,
   created_by TEXT REFERENCES actors(id),
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_grant_action ON credential_grants(action_id, status);
 CREATE INDEX IF NOT EXISTS idx_grant_tenant ON credential_grants(tenant_id, expires_at);
@@ -39,9 +39,9 @@ CREATE TABLE IF NOT EXISTS action_executions (
   result_summary TEXT NOT NULL DEFAULT '{}',    -- 脱敏后的结果摘要（JSON，截断 4K）
   status TEXT NOT NULL DEFAULT 'running'
     CHECK (status IN ('running','succeeded','failed','compensated','reconciling')),
-  started_at INTEGER NOT NULL,
-  finished_at INTEGER,
-  created_at INTEGER NOT NULL,
+  started_at BIGINT NOT NULL,
+  finished_at BIGINT,
+  created_at BIGINT NOT NULL,
   UNIQUE (tenant_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_bxn_action ON action_executions(action_id, created_at);
@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
   plan_id TEXT NOT NULL REFERENCES business_plans(id),
   tenant_id TEXT NOT NULL REFERENCES tenants(id),
   approver_id TEXT NOT NULL REFERENCES actors(id),
-  decided_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
+  decided_at BIGINT NOT NULL,
+  created_at BIGINT NOT NULL,
   UNIQUE (plan_id)                               -- 一个计划只保留最新一次审批记录
 );
 CREATE INDEX IF NOT EXISTS idx_bpar_plan ON plan_approvals(plan_id);
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_items (
   reason TEXT NOT NULL DEFAULT '',              -- 进入对账的原因（已脱敏）
   status TEXT NOT NULL DEFAULT 'open'
     CHECK (status IN ('open','acknowledged','resolved')),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_brec_tenant ON reconciliation_items(tenant_id, status, created_at);

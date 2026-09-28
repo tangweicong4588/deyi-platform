@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
   payload TEXT NOT NULL DEFAULT '{}',           -- JSON（脱敏后）
   prev_hash TEXT NOT NULL,
   hash TEXT NOT NULL,
-  seq INTEGER NOT NULL,                         -- 租户内单调序号
-  created_at INTEGER NOT NULL
+  seq BIGINT NOT NULL,                         -- 租户内单调序号
+  created_at BIGINT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_tenant_seq ON audit_events(tenant_id, seq);
 CREATE INDEX IF NOT EXISTS idx_audit_tenant_time ON audit_events(tenant_id, created_at);
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS evidence_packages (
   anchored INTEGER NOT NULL DEFAULT 0,
   anchor_ref TEXT,
   created_by TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pkg_tenant ON evidence_packages(tenant_id, created_at);
 
@@ -52,9 +52,9 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
   day TEXT NOT NULL,                            -- YYYY-MM-DD
   model TEXT NOT NULL,
   tokens INTEGER NOT NULL DEFAULT 0,
-  cost_cents INTEGER NOT NULL DEFAULT 0,
+  cost_cents BIGINT NOT NULL DEFAULT 0,
   calls INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL
+  updated_at BIGINT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_ledger
   ON cost_ledger(tenant_id, COALESCE(project_id, ''), day, model);
@@ -69,6 +69,6 @@ CREATE TABLE IF NOT EXISTS anchors (
   method TEXT NOT NULL,                         -- http-anchor | manual
   ref TEXT,                                     -- 锚定服务返回的引用（token/tx）
   status TEXT NOT NULL DEFAULT 'ok',
-  created_at INTEGER NOT NULL
+  created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_anchors_tenant ON anchors(tenant_id, created_at);
