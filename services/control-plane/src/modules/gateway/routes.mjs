@@ -12,7 +12,7 @@ import { ctx, requireTenant } from '../../kernel/context.mjs';
 import { nowMs, newId } from '../../kernel/ids.mjs';
 import { authenticate, tenantScope, requireTenantRole, requireOperator, requireScope } from '../identity/middleware.mjs';
 import { getProject, getTenant, getTenantQuotas } from '../identity/store.mjs';
-import { checkRateLimit } from './ratelimit.mjs';
+import { getRateLimiter } from './ratelimit/index.mjs';
 import { decide, inputFromRequest } from '../policy/index.mjs';
 import * as gstore from './store.mjs';
 import { resolveModel, checkDataClass, estimateCost, calcCostCents } from './router.mjs';
@@ -54,7 +54,7 @@ async function rateLimitGuard(req, res, next) {
   const c = ctx();
   const t = c.tenantId ? await getTenant(c.tenantId).catch(() => null) : null;
   const rpm = t ? getTenantQuotas(t).rpm : null;
-  const r = checkRateLimit(`gw:${c.tenantId}:${c.keyId || c.actorId}`, rpm);
+  const r = await getRateLimiter().check(`gw:${c.tenantId}:${c.keyId || c.actorId}`, rpm);
   if (r.limited) {
     res.setHeader('x-ratelimit-limit', String(rpm));
     res.setHeader('x-ratelimit-remaining', String(r.remaining));

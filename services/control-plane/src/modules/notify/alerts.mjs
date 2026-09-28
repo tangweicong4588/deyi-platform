@@ -8,13 +8,14 @@
  * - best-effort：emitAlert 永远不抛错；无通道记 skipped，投递失败记 failed，不阻塞主流程。
  * - 采样节流：ratelimit.hit（60s/租户）、budget.exhausted（300s/租户）防轰炸；
  *   invoice.finalized / tenant.suspended 为低频管理事件，不采样。
- * - 采样状态为进程内存（与网关内存限流一致）；多副本集中化随 V2.15 Redis 落地。
+ * - 采样状态走共享限流器后端（memory/redis 可配）；多副本集中化已随 V2.15 Redis 落地。
  *
  * 调用约定：网关热路径（402/429）用 `void emitAlert(...)` 不等待响应；
  * 低频管理路径（账单定稿/租户停用）await 等待，测试可确定性断言。
  */
 import { sendNotification } from './service.mjs';
 import { logger } from '../../kernel/logging.mjs';
+import { getRateLimiter } from '../gateway/ratelimit/index.mjs';
 
 export const ALERT_INTENTS = ['budget.exhausted', 'ratelimit.hit', 'invoice.finalized', 'tenant.suspended'];
 
@@ -24,18 +25,30 @@ export const SAMPLE_WINDOWS = {
   'budget.exhausted': 300_000,
 };
 
-const lastSent = new Map(); // `${tenantId}:${intent}` -> timestamp
+const lastSent = new Map(); // 降级兜底：限流器不可用时的进程内存采样 `${tenantId}:${intent}` -> timestamp
 /** 测试用：清空采样状态 */
-export function clearAlertSamples() { lastSent.clear(); }
+export function clearAlertSamples() {
+  lastSent.clear();
+  try { getRateLimiter().__internal?.clear?.(); } catch { /* ignore */ }
+}
 
-function shouldSend(tenantId, intent) {
+/**
+ * V2.15：采样节流走共享限流器后端（memory/redis 可配），多实例下集中防轰炸；
+ * 限流器异常时回退进程内存 Map（best-effort，不抛错）。
+ */
+async function shouldSend(tenantId, intent) {
   const w = SAMPLE_WINDOWS[intent];
   if (!w) return true;
-  const k = `${tenantId}:${intent}`;
-  const last = lastSent.get(k) || 0;
-  if (Date.now() - last < w) return false;
-  lastSent.set(k, Date.now());
-  return true;
+  const k = `alert:${tenantId}:${intent}`;
+  try {
+    return await getRateLimiter().throttle(k, w);
+  } catch (e) {
+    logger.warn('告警采样节流异常，回退进程内存', { error: String(e?.message || e).slice(0, 120) });
+    const last = lastSent.get(k) || 0;
+    if (Date.now() - last < w) return false;
+    lastSent.set(k, Date.now());
+    return true;
+  }
 }
 
 /**
@@ -49,7 +62,7 @@ export async function emitAlert({ tenantId, intent, title, body, extra = {} }) {
       logger.warn('未知告警 intent，已忽略', { tenantId, intent });
       return { sent: false, reason: 'unknown-intent' };
     }
-    if (!shouldSend(tenantId, intent)) return { sent: false, reason: 'sampled' };
+    if (!(await shouldSend(tenantId, intent))) return { sent: false, reason: 'sampled' };
     const r = await sendNotification({ tenantId, intent, title, body, extra });
     return { sent: true, ...r };
   } catch (e) {

@@ -41,6 +41,8 @@ const DEF = {
   QDRANT_URL: '',            // 设了就走 Qdrant，否则用内置本地向量索引（仅开发/测试）
   DOCLING_URL: '',           // 设了就走 Docling 服务，否则用内置解析器（能力降级）
   TEMPORAL_ADDRESS: '',      // 设了就走 Temporal，否则用内置工作流执行器
+  RATELIMIT_BACKEND: 'memory', // 限流后端：memory（单实例）| redis（多实例共享计数，Lua 原子）
+  REDIS_URL: '',               // redis://[[user]:pass@]host:port[/db]；RATELIMIT_BACKEND=redis 时使用，缺席自动降级内存并告警
   GITEA_URL: '',               // 设了 gitea provider 就走真 Gitea API，否则用 fake（内存/本地 git，仅开发/测试）
   RUNNER_MODE: 'live',          // 隔离 Runner：live=本机隔离执行；fake=内存模拟（simulated:true，仅开发/测试）
   RUNNER_ROOT: '',              // Runner 工作区根目录；未设则用系统临时目录下 deyi-runner
