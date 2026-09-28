@@ -40,7 +40,8 @@ const CONFIRM_TTL_MS = 15 * 60_000;
  * audit_events 单独走 wipeAudit（在 projects 之前，因 FK 引用 projects）。
  * tenants / billing_invoices / anchors / audit_heads 不删（见模块头注释）。
  */
-const TABLE_DELETE_ORDER = [
+/** 删除拓扑序（叶子→根）。tenant-export/import 复用同一顺序，保证单租户恢复的外键顺序。 */
+export const TABLE_DELETE_ORDER = [
   // --- 叶子：业务单据/执行/访问 ---
   'reconciliation_items', 'acceptance_criteria', 'acl_entries',
   'action_executions', 'artifacts', 'artifact_links', 'artifact_versions', 'artifact_packages',
