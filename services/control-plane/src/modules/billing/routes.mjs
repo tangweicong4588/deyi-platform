@@ -10,6 +10,7 @@
  *   POST   /v1/tenants/:tenantId/billing/invoices/:id/void      作废
  * 运营面（operator）：
  *   POST   /v1/admin/billing/run                              全租户跑批 {period_key}
+ *   GET    /v1/admin/tenants/:tenantId/cost/breakdown          成本分摊 ?by=project|actor&from&to（V2.17）
  */
 import { authenticate, tenantScope, requireTenantRole, requireOperator, requireScope } from '../identity/middleware.mjs';
 import { sendJson } from '../../kernel/http.mjs';
@@ -17,6 +18,7 @@ import {
   generateInvoice, finalizeInvoice, markInvoicePaid, voidInvoice,
   getInvoice, listInvoices, runBilling,
 } from './service.mjs';
+import { getCostBreakdown } from './breakdown.mjs';
 
 const ok = (res, data, status = 200) => sendJson(res, status, { data });
 
@@ -43,6 +45,12 @@ export function registerBillingRoutes(app) {
   });
   app.post(R('/invoices/:id/void'), ...admin, requireScope('billing.write'), async (req, res) => {
     ok(res, await voidInvoice(req.params.tenantId, req.params.id));
+  });
+
+  // V2.17：成本分摊报表（operator 跨租户；by=project|actor；归档区间明确标注）
+  app.get('/v1/admin/tenants/:tenantId/cost/breakdown', authenticate, requireOperator, async (req, res) => {
+    const q = req.query || {};
+    ok(res, await getCostBreakdown(req.params.tenantId, { by: q.by || 'project', from: q.from || null, to: q.to || null }));
   });
 
   app.post('/v1/admin/billing/run', authenticate, requireOperator, async (req, res) => {
